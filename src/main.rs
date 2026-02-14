@@ -8,9 +8,9 @@ mod tui;
 
 use config::Config;
 use jmap::client::JmapClient;
-use std::io::{self, BufRead, Write};
-use std::os::unix::io::AsRawFd;
+use std::io::{self, Write};
 use std::path::PathBuf;
+use std::process::Command;
 
 fn default_config_path() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
@@ -22,33 +22,25 @@ fn default_config_path() -> PathBuf {
     }
 }
 
-fn prompt(msg: &str) -> String {
-    eprint!("{}", msg);
-    io::stderr().flush().ok();
-    let mut line = String::new();
-    io::stdin().lock().read_line(&mut line).ok();
-    line.trim().to_string()
-}
+fn run_password_command(cmd: &str) -> Result<String, String> {
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .output()
+        .map_err(|e| format!("failed to execute password command: {}", e))?;
 
-fn prompt_password(msg: &str) -> String {
-    let stdin_fd = io::stdin().as_raw_fd();
-    let mut termios: libc::termios = unsafe { std::mem::zeroed() };
-    let got_termios = unsafe { libc::tcgetattr(stdin_fd, &mut termios) } == 0;
-
-    if got_termios {
-        let mut noecho = termios;
-        noecho.c_lflag &= !libc::ECHO;
-        unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &noecho) };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "password command exited with {}: {}",
+            output.status, stderr
+        ));
     }
 
-    let result = prompt(msg);
+    let password = String::from_utf8(output.stdout)
+        .map_err(|e| format!("password command output is not valid UTF-8: {}", e))?;
 
-    if got_termios {
-        unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &termios) };
-    }
-
-    eprintln!(); // newline after hidden password input
-    result
+    Ok(password.trim_end_matches('\n').to_string())
 }
 
 fn main() {
@@ -61,20 +53,27 @@ fn main() {
             eprintln!();
             eprintln!("  [jmap]");
             eprintln!("  well_known_url = \"https://your-server/.well-known/jmap\"");
+            eprintln!("  username = \"you@example.com\"");
+            eprintln!("  password_command = \"pass show email/example.com\"");
             std::process::exit(1);
         }
     };
 
-    // Credentials are prompted before entering TUI mode (normal terminal)
-    let username = prompt("Username: ");
-    let password = prompt_password("Password: ");
+    // Get password by running the configured command
+    let password = match run_password_command(&config.jmap.password_command) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     // JMAP session discovery
     eprint!("Connecting to {}...", config.jmap.well_known_url);
     io::stderr().flush().ok();
 
     let (_session, client) =
-        match JmapClient::discover(&config.jmap.well_known_url, &username, &password) {
+        match JmapClient::discover(&config.jmap.well_known_url, &config.jmap.username, &password) {
             Ok(result) => {
                 eprintln!(" OK");
                 result

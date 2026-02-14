@@ -10,6 +10,8 @@ pub struct Config {
 #[derive(Debug)]
 pub struct JmapConfig {
     pub well_known_url: String,
+    pub username: String,
+    pub password_command: String,
 }
 
 #[derive(Debug)]
@@ -41,6 +43,8 @@ impl Config {
 
     fn parse(contents: &str) -> Result<Self, ConfigError> {
         let mut well_known_url = None;
+        let mut username = None;
+        let mut password_command = None;
         let mut editor = None;
         let mut page_size = 50u32;
 
@@ -74,6 +78,12 @@ impl Config {
                     ("jmap", "well_known_url") => {
                         well_known_url = Some(value.to_string());
                     }
+                    ("jmap", "username") => {
+                        username = Some(value.to_string());
+                    }
+                    ("jmap", "password_command") => {
+                        password_command = Some(value.to_string());
+                    }
                     ("ui", "editor") => {
                         editor = Some(value.to_string());
                     }
@@ -88,9 +98,15 @@ impl Config {
         let well_known_url = well_known_url.ok_or_else(|| {
             ConfigError::Parse("missing [jmap] well_known_url".to_string())
         })?;
+        let username = username.ok_or_else(|| {
+            ConfigError::Parse("missing [jmap] username".to_string())
+        })?;
+        let password_command = password_command.ok_or_else(|| {
+            ConfigError::Parse("missing [jmap] password_command".to_string())
+        })?;
 
         Ok(Config {
-            jmap: JmapConfig { well_known_url },
+            jmap: JmapConfig { well_known_url, username, password_command },
             ui: UiConfig { editor, page_size },
         })
     }
@@ -105,6 +121,8 @@ mod tests {
         let toml = r#"
 [jmap]
 well_known_url = "https://mx.example.com/.well-known/jmap"
+username = "user@example.com"
+password_command = "pass show email/example.com"
 
 [ui]
 # editor = "vim"
@@ -115,6 +133,8 @@ page_size = 25
             config.jmap.well_known_url,
             "https://mx.example.com/.well-known/jmap"
         );
+        assert_eq!(config.jmap.username, "user@example.com");
+        assert_eq!(config.jmap.password_command, "pass show email/example.com");
         assert_eq!(config.ui.page_size, 25);
         assert!(config.ui.editor.is_none());
     }
