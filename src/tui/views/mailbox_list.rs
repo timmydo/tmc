@@ -1,68 +1,60 @@
-use crate::jmap::client::JmapClient;
+use crate::backend::{BackendCommand, BackendResponse};
 use crate::jmap::types::Mailbox;
 use crate::tui::input::Key;
 use crate::tui::screen::Terminal;
 use crate::tui::views::email_list::EmailListView;
 use crate::tui::views::{View, ViewAction};
-use std::cell::RefCell;
 use std::io;
-use std::rc::Rc;
+use std::sync::mpsc;
 
 pub struct MailboxListView {
-    client: Rc<RefCell<JmapClient>>,
+    cmd_tx: mpsc::Sender<BackendCommand>,
     page_size: u32,
     mailboxes: Vec<Mailbox>,
     cursor: usize,
+    loading: bool,
     error: Option<String>,
 }
 
 impl MailboxListView {
-    pub fn new(client: Rc<RefCell<JmapClient>>, page_size: u32) -> Self {
+    pub fn new(cmd_tx: mpsc::Sender<BackendCommand>, page_size: u32) -> Self {
         MailboxListView {
-            client,
+            cmd_tx,
             page_size,
             mailboxes: Vec::new(),
             cursor: 0,
+            loading: true,
             error: None,
         }
     }
 
-    pub fn refresh(&mut self) {
-        match self.client.borrow().get_mailboxes() {
-            Ok(mut mailboxes) => {
-                // Sort: role-based mailboxes first (inbox, drafts, sent, trash, archive),
-                // then alphabetically
-                mailboxes.sort_by(|a, b| {
-                    let rank = |m: &Mailbox| -> u32 {
-                        match m.role.as_deref() {
-                            Some("inbox") => 0,
-                            Some("drafts") => 1,
-                            Some("sent") => 2,
-                            Some("junk") => 3,
-                            Some("trash") => 4,
-                            Some("archive") => 5,
-                            Some(_) => 6,
-                            None => 7,
-                        }
-                    };
-                    let ra = rank(a);
-                    let rb = rank(b);
-                    if ra != rb {
-                        ra.cmp(&rb)
-                    } else {
-                        a.name.to_lowercase().cmp(&b.name.to_lowercase())
-                    }
-                });
-                self.mailboxes = mailboxes;
-                self.error = None;
-                if self.cursor >= self.mailboxes.len() && !self.mailboxes.is_empty() {
-                    self.cursor = self.mailboxes.len() - 1;
+    fn request_refresh(&mut self) {
+        self.loading = true;
+        let _ = self.cmd_tx.send(BackendCommand::FetchMailboxes);
+    }
+
+    fn sort_mailboxes(mailboxes: &mut [Mailbox]) {
+        mailboxes.sort_by(|a, b| {
+            let rank = |m: &Mailbox| -> u32 {
+                match m.role.as_deref() {
+                    Some("inbox") => 0,
+                    Some("drafts") => 1,
+                    Some("sent") => 2,
+                    Some("junk") => 3,
+                    Some("trash") => 4,
+                    Some("archive") => 5,
+                    Some(_) => 6,
+                    None => 7,
                 }
+            };
+            let ra = rank(a);
+            let rb = rank(b);
+            if ra != rb {
+                ra.cmp(&rb)
+            } else {
+                a.name.to_lowercase().cmp(&b.name.to_lowercase())
             }
-            Err(e) => {
-                self.error = Some(format!("Failed to fetch mailboxes: {}", e));
-            }
-        }
+        });
     }
 
     fn format_mailbox(m: &Mailbox) -> String {
@@ -91,7 +83,10 @@ impl View for MailboxListView {
         let sep = "-".repeat(term.cols as usize);
         term.write_str(&sep)?;
 
-        if let Some(ref err) = self.error {
+        if self.loading && self.mailboxes.is_empty() {
+            term.move_to(3, 1)?;
+            term.write_truncated("Loading mailboxes...", term.cols)?;
+        } else if let Some(ref err) = self.error {
             term.move_to(3, 1)?;
             term.write_truncated(err, term.cols)?;
         } else if self.mailboxes.is_empty() {
@@ -99,7 +94,6 @@ impl View for MailboxListView {
             term.write_truncated("No mailboxes found.", term.cols)?;
         } else {
             let max_items = (term.rows as usize).saturating_sub(4);
-            // Scrolling: keep cursor visible
             let scroll_offset = if self.cursor >= max_items {
                 self.cursor - max_items + 1
             } else {
@@ -136,7 +130,9 @@ impl View for MailboxListView {
         // Status bar
         term.move_to(term.rows, 1)?;
         term.set_reverse()?;
-        let status = if self.mailboxes.is_empty() {
+        let status = if self.loading {
+            " Loading... | q:quit".to_string()
+        } else if self.mailboxes.is_empty() {
             " q:quit g:refresh".to_string()
         } else {
             format!(
@@ -172,23 +168,51 @@ impl View for MailboxListView {
             }
             Key::Enter => {
                 if let Some(mailbox) = self.mailboxes.get(self.cursor) {
-                    let mut view = EmailListView::new(
-                        Rc::clone(&self.client),
+                    let view = EmailListView::new(
+                        self.cmd_tx.clone(),
                         mailbox.id.clone(),
                         mailbox.name.clone(),
                         self.page_size,
                     );
-                    view.refresh();
+                    // Send the query command
+                    let _ = self.cmd_tx.send(BackendCommand::QueryEmails {
+                        mailbox_id: mailbox.id.clone(),
+                        page_size: self.page_size,
+                    });
                     ViewAction::Push(Box::new(view))
                 } else {
                     ViewAction::Continue
                 }
             }
             Key::Char('g') => {
-                self.refresh();
+                self.request_refresh();
                 ViewAction::Continue
             }
             _ => ViewAction::Continue,
+        }
+    }
+
+    fn on_response(&mut self, response: &BackendResponse) -> bool {
+        match response {
+            BackendResponse::Mailboxes(result) => {
+                self.loading = false;
+                match result {
+                    Ok(mailboxes) => {
+                        let mut mailboxes = mailboxes.clone();
+                        Self::sort_mailboxes(&mut mailboxes);
+                        self.mailboxes = mailboxes;
+                        self.error = None;
+                        if self.cursor >= self.mailboxes.len() && !self.mailboxes.is_empty() {
+                            self.cursor = self.mailboxes.len() - 1;
+                        }
+                    }
+                    Err(e) => {
+                        self.error = Some(format!("Failed to fetch mailboxes: {}", e));
+                    }
+                }
+                true
+            }
+            _ => false,
         }
     }
 }

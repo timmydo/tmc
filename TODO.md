@@ -22,10 +22,10 @@
 - [x] Email view (Email/get with body values, plain text rendering)
 
 ## Phase 3: Background Threading
-- [ ] Spawn backend thread for JMAP operations
-- [ ] mpsc channels: UI→Backend commands, Backend→UI results
-- [ ] UI refresh on incoming data (poll channel in event loop)
-- [ ] Loading indicators while fetching
+- [x] Spawn backend thread for JMAP operations
+- [x] mpsc channels: UI→Backend commands, Backend→UI results
+- [x] UI refresh on incoming data (poll channel in event loop)
+- [x] Loading indicators while fetching
 
 ## Phase 4: Compose & Reply
 - [ ] $EDITOR integration: suspend TUI, exec editor, resume

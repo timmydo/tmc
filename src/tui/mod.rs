@@ -2,21 +2,21 @@ pub mod input;
 pub mod screen;
 pub mod views;
 
+use crate::backend::{self, BackendCommand};
 use crate::jmap::client::JmapClient;
 use input::read_key;
 use screen::Terminal;
-use std::cell::RefCell;
 use std::io;
-use std::rc::Rc;
 use views::mailbox_list::MailboxListView;
 use views::{ViewAction, ViewStack};
 
 pub fn run(client: JmapClient, page_size: u32) -> io::Result<()> {
-    let client = Rc::new(RefCell::new(client));
+    let (cmd_tx, resp_rx) = backend::spawn(client);
     let mut term = Terminal::new()?;
 
-    let mut mailbox_view = MailboxListView::new(Rc::clone(&client), page_size);
-    mailbox_view.refresh();
+    let mailbox_view = MailboxListView::new(cmd_tx.clone(), page_size);
+    // Request initial mailbox fetch
+    let _ = cmd_tx.send(BackendCommand::FetchMailboxes);
 
     let mut stack = ViewStack::new(Box::new(mailbox_view));
 
@@ -26,6 +26,17 @@ pub fn run(client: JmapClient, page_size: u32) -> io::Result<()> {
     loop {
         // Check for terminal resize
         if term.check_resize() {
+            stack.render_current(&mut term)?;
+        }
+
+        // Poll backend responses (non-blocking)
+        let mut needs_render = false;
+        while let Ok(response) = resp_rx.try_recv() {
+            if stack.handle_response(&response) {
+                needs_render = true;
+            }
+        }
+        if needs_render {
             stack.render_current(&mut term)?;
         }
 
@@ -56,6 +67,9 @@ pub fn run(client: JmapClient, page_size: u32) -> io::Result<()> {
             }
         }
     }
+
+    // Signal backend to shut down
+    let _ = cmd_tx.send(BackendCommand::Shutdown);
 
     Ok(())
 }

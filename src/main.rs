@@ -1,6 +1,7 @@
 #[macro_use]
 mod log;
 
+mod backend;
 mod config;
 mod jmap;
 mod tui;

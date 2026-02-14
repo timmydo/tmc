@@ -1,70 +1,50 @@
-use crate::jmap::client::JmapClient;
+use crate::backend::{BackendCommand, BackendResponse};
 use crate::jmap::types::Email;
 use crate::tui::input::Key;
 use crate::tui::screen::Terminal;
 use crate::tui::views::email_view::EmailView;
 use crate::tui::views::{View, ViewAction};
-use std::cell::RefCell;
 use std::io;
-use std::rc::Rc;
+use std::sync::mpsc;
 
 pub struct EmailListView {
-    client: Rc<RefCell<JmapClient>>,
+    cmd_tx: mpsc::Sender<BackendCommand>,
     mailbox_id: String,
     mailbox_name: String,
     page_size: u32,
     emails: Vec<Email>,
     cursor: usize,
     total: Option<u32>,
+    loading: bool,
     error: Option<String>,
 }
 
 impl EmailListView {
     pub fn new(
-        client: Rc<RefCell<JmapClient>>,
+        cmd_tx: mpsc::Sender<BackendCommand>,
         mailbox_id: String,
         mailbox_name: String,
         page_size: u32,
     ) -> Self {
         EmailListView {
-            client,
+            cmd_tx,
             mailbox_id,
             mailbox_name,
             page_size,
             emails: Vec::new(),
             cursor: 0,
             total: None,
+            loading: true,
             error: None,
         }
     }
 
-    pub fn refresh(&mut self) {
-        let client = self.client.borrow();
-        match client.query_emails(&self.mailbox_id, self.page_size, 0) {
-            Ok(result) => {
-                self.total = result.total;
-                if result.ids.is_empty() {
-                    self.emails.clear();
-                    self.error = None;
-                    return;
-                }
-                match client.get_emails(&result.ids) {
-                    Ok(emails) => {
-                        self.emails = emails;
-                        self.error = None;
-                        if self.cursor >= self.emails.len() && !self.emails.is_empty() {
-                            self.cursor = self.emails.len() - 1;
-                        }
-                    }
-                    Err(e) => {
-                        self.error = Some(format!("Failed to fetch emails: {}", e));
-                    }
-                }
-            }
-            Err(e) => {
-                self.error = Some(format!("Failed to query emails: {}", e));
-            }
-        }
+    fn request_refresh(&mut self) {
+        self.loading = true;
+        let _ = self.cmd_tx.send(BackendCommand::QueryEmails {
+            mailbox_id: self.mailbox_id.clone(),
+            page_size: self.page_size,
+        });
     }
 
     fn is_unread(email: &Email) -> bool {
@@ -91,7 +71,6 @@ impl EmailListView {
             .received_at
             .as_deref()
             .map(|d| {
-                // Show just date portion: YYYY-MM-DD
                 if d.len() >= 10 {
                     &d[..10]
                 } else {
@@ -101,8 +80,6 @@ impl EmailListView {
             .unwrap_or("");
 
         let w = width as usize;
-        // Layout: " N  date  from  subject"
-        // date = 10, gaps = ~6, from = ~20, rest = subject
         let from_width = 20.min(w.saturating_sub(18));
         let subj_width = w.saturating_sub(18 + from_width);
 
@@ -153,7 +130,10 @@ impl View for EmailListView {
         let sep = "-".repeat(term.cols as usize);
         term.write_str(&sep)?;
 
-        if let Some(ref err) = self.error {
+        if self.loading && self.emails.is_empty() {
+            term.move_to(3, 1)?;
+            term.write_truncated("Loading emails...", term.cols)?;
+        } else if let Some(ref err) = self.error {
             term.move_to(3, 1)?;
             term.write_truncated(err, term.cols)?;
         } else if self.emails.is_empty() {
@@ -197,7 +177,9 @@ impl View for EmailListView {
         // Status bar
         term.move_to(term.rows, 1)?;
         term.set_reverse()?;
-        let status = if self.emails.is_empty() {
+        let status = if self.loading {
+            " Loading... | q:back".to_string()
+        } else if self.emails.is_empty() {
             " q:back g:refresh".to_string()
         } else {
             format!(
@@ -233,18 +215,47 @@ impl View for EmailListView {
             }
             Key::Enter => {
                 if let Some(email) = self.emails.get(self.cursor) {
-                    let mut view = EmailView::new(Rc::clone(&self.client), email.id.clone());
-                    view.load();
+                    let view = EmailView::new(self.cmd_tx.clone(), email.id.clone());
+                    let _ = self.cmd_tx.send(BackendCommand::GetEmail {
+                        id: email.id.clone(),
+                    });
                     ViewAction::Push(Box::new(view))
                 } else {
                     ViewAction::Continue
                 }
             }
             Key::Char('g') => {
-                self.refresh();
+                self.request_refresh();
                 ViewAction::Continue
             }
             _ => ViewAction::Continue,
+        }
+    }
+
+    fn on_response(&mut self, response: &BackendResponse) -> bool {
+        match response {
+            BackendResponse::Emails {
+                mailbox_id,
+                emails,
+                total,
+            } if *mailbox_id == self.mailbox_id => {
+                self.loading = false;
+                self.total = *total;
+                match emails {
+                    Ok(emails) => {
+                        self.emails = emails.clone();
+                        self.error = None;
+                        if self.cursor >= self.emails.len() && !self.emails.is_empty() {
+                            self.cursor = self.emails.len() - 1;
+                        }
+                    }
+                    Err(e) => {
+                        self.error = Some(format!("Failed to fetch emails: {}", e));
+                    }
+                }
+                true
+            }
+            _ => false,
         }
     }
 }

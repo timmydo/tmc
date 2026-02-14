@@ -1,43 +1,31 @@
-use crate::jmap::client::JmapClient;
+use crate::backend::BackendResponse;
 use crate::jmap::types::Email;
 use crate::tui::input::Key;
 use crate::tui::screen::Terminal;
 use crate::tui::views::{View, ViewAction};
-use std::cell::RefCell;
 use std::io;
-use std::rc::Rc;
+use std::sync::mpsc;
+
+use crate::backend::BackendCommand;
 
 pub struct EmailView {
-    client: Rc<RefCell<JmapClient>>,
+    _cmd_tx: mpsc::Sender<BackendCommand>,
     email_id: String,
     lines: Vec<String>,
     scroll: usize,
+    loading: bool,
     error: Option<String>,
 }
 
 impl EmailView {
-    pub fn new(client: Rc<RefCell<JmapClient>>, email_id: String) -> Self {
+    pub fn new(cmd_tx: mpsc::Sender<BackendCommand>, email_id: String) -> Self {
         EmailView {
-            client,
+            _cmd_tx: cmd_tx,
             email_id,
             lines: Vec::new(),
             scroll: 0,
+            loading: true,
             error: None,
-        }
-    }
-
-    pub fn load(&mut self) {
-        match self.client.borrow().get_email(&self.email_id) {
-            Ok(Some(email)) => {
-                self.lines = Self::render_email(&email);
-                self.error = None;
-            }
-            Ok(None) => {
-                self.error = Some("Email not found.".to_string());
-            }
-            Err(e) => {
-                self.error = Some(format!("Failed to load email: {}", e));
-            }
         }
     }
 
@@ -70,7 +58,7 @@ impl EmailView {
         // Separator
         lines.push(String::new());
 
-        // Body: extract plain text from body values
+        // Body
         let body_text = Self::extract_body(email);
         for line in body_text.lines() {
             lines.push(line.to_string());
@@ -80,7 +68,6 @@ impl EmailView {
     }
 
     fn extract_body(email: &Email) -> String {
-        // Try text_body parts first
         if let Some(ref text_body) = email.text_body {
             for part in text_body {
                 if let Some(value) = email.body_values.get(&part.part_id) {
@@ -89,7 +76,6 @@ impl EmailView {
             }
         }
 
-        // Fallback to preview
         email
             .preview
             .as_deref()
@@ -101,6 +87,20 @@ impl EmailView {
 impl View for EmailView {
     fn render(&self, term: &mut Terminal) -> io::Result<()> {
         term.clear()?;
+
+        if self.loading {
+            term.move_to(1, 1)?;
+            term.write_truncated("Loading email...", term.cols)?;
+            term.move_to(term.rows, 1)?;
+            term.set_reverse()?;
+            term.write_truncated(" Loading... | q:back", term.cols)?;
+            let remaining = (term.cols as usize).saturating_sub(20);
+            for _ in 0..remaining {
+                term.write_str(" ")?;
+            }
+            term.reset_attr()?;
+            return term.flush();
+        }
 
         if let Some(ref err) = self.error {
             term.move_to(1, 1)?;
@@ -116,13 +116,13 @@ impl View for EmailView {
             return term.flush();
         }
 
-        let visible_rows = (term.rows as usize).saturating_sub(1); // reserve 1 for status bar
+        let visible_rows = (term.rows as usize).saturating_sub(1);
 
         for (i, line) in self.lines.iter().skip(self.scroll).enumerate().take(visible_rows) {
             let row = 1 + i as u16;
             term.move_to(row, 1)?;
 
-            // Bold headers (lines before the first empty line, i.e. scroll+i < header separator)
+            // Bold headers (lines before the first empty line)
             let abs_idx = self.scroll + i;
             let is_header = abs_idx < self.lines.len()
                 && self.lines[..abs_idx].iter().all(|l| !l.is_empty());
@@ -171,7 +171,6 @@ impl View for EmailView {
                 ViewAction::Continue
             }
             Key::PageDown | Key::Char(' ') => {
-                // Scroll down by roughly a screenful (20 lines as estimate)
                 self.scroll = (self.scroll + 20).min(self.lines.len().saturating_sub(1));
                 ViewAction::Continue
             }
@@ -188,6 +187,25 @@ impl View for EmailView {
                 ViewAction::Continue
             }
             _ => ViewAction::Continue,
+        }
+    }
+
+    fn on_response(&mut self, response: &BackendResponse) -> bool {
+        match response {
+            BackendResponse::EmailBody { id, result } if *id == self.email_id => {
+                self.loading = false;
+                match result.as_ref() {
+                    Ok(email) => {
+                        self.lines = Self::render_email(email);
+                        self.error = None;
+                    }
+                    Err(e) => {
+                        self.error = Some(format!("Failed to load email: {}", e));
+                    }
+                }
+                true
+            }
+            _ => false,
         }
     }
 }
