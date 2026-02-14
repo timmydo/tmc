@@ -8,11 +8,11 @@
 - [x] Implement simple logging macros (no dependency)
 
 ## Phase 1: Minimal TUI
-- [ ] Raw terminal mode (termios via libc or hand-rolled)
-- [ ] Basic screen drawing: clear, cursor movement, text output
-- [ ] Input loop: read keystrokes, dispatch to handlers
-- [ ] View stack: push/pop views with `RET`/`q`
-- [ ] Resize handling (SIGWINCH)
+- [x] Raw terminal mode (termios via libc or hand-rolled)
+- [x] Basic screen drawing: clear, cursor movement, text output
+- [x] Input loop: read keystrokes, dispatch to handlers
+- [x] View stack: push/pop views with `RET`/`q`
+- [x] Resize handling (SIGWINCH)
 
 ## Phase 2: JMAP Read Path
 - [ ] Login prompt (username/password at startup)
