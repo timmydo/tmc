@@ -2,15 +2,23 @@ pub mod input;
 pub mod screen;
 pub mod views;
 
+use crate::jmap::client::JmapClient;
 use input::read_key;
 use screen::Terminal;
+use std::cell::RefCell;
 use std::io;
+use std::rc::Rc;
 use views::mailbox_list::MailboxListView;
 use views::{ViewAction, ViewStack};
 
-pub fn run() -> io::Result<()> {
+pub fn run(client: JmapClient, page_size: u32) -> io::Result<()> {
+    let client = Rc::new(RefCell::new(client));
     let mut term = Terminal::new()?;
-    let mut stack = ViewStack::new(Box::new(MailboxListView::new()));
+
+    let mut mailbox_view = MailboxListView::new(Rc::clone(&client), page_size);
+    mailbox_view.refresh();
+
+    let mut stack = ViewStack::new(Box::new(mailbox_view));
 
     // Initial render
     stack.render_current(&mut term)?;

@@ -1,3 +1,5 @@
+pub mod email_list;
+pub mod email_view;
 pub mod mailbox_list;
 
 use super::input::Key;
@@ -49,9 +51,5 @@ impl ViewStack {
         } else {
             false
         }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.views.is_empty()
     }
 }

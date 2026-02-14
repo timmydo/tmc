@@ -15,11 +15,11 @@
 - [x] Resize handling (SIGWINCH)
 
 ## Phase 2: JMAP Read Path
-- [ ] Login prompt (username/password at startup)
-- [ ] JMAP session discovery (.well-known/jmap)
-- [ ] Mailbox list view (Mailbox/get)
-- [ ] Email list view (Email/query + Email/get for headers)
-- [ ] Email view (Email/get with body values, plain text rendering)
+- [x] Login prompt (username/password at startup)
+- [x] JMAP session discovery (.well-known/jmap)
+- [x] Mailbox list view (Mailbox/get)
+- [x] Email list view (Email/query + Email/get for headers)
+- [x] Email view (Email/get with body values, plain text rendering)
 
 ## Phase 3: Background Threading
 - [ ] Spawn backend thread for JMAP operations

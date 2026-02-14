@@ -6,7 +6,9 @@ mod jmap;
 mod tui;
 
 use config::Config;
+use jmap::client::JmapClient;
 use std::io::{self, BufRead, Write};
+use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 
 fn default_config_path() -> PathBuf {
@@ -28,13 +30,29 @@ fn prompt(msg: &str) -> String {
 }
 
 fn prompt_password(msg: &str) -> String {
-    // TODO: disable echo for password input (termios)
-    prompt(msg)
+    let stdin_fd = io::stdin().as_raw_fd();
+    let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+    let got_termios = unsafe { libc::tcgetattr(stdin_fd, &mut termios) } == 0;
+
+    if got_termios {
+        let mut noecho = termios;
+        noecho.c_lflag &= !libc::ECHO;
+        unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &noecho) };
+    }
+
+    let result = prompt(msg);
+
+    if got_termios {
+        unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &termios) };
+    }
+
+    eprintln!(); // newline after hidden password input
+    result
 }
 
 fn main() {
     let config_path = default_config_path();
-    let _config = match Config::load(&config_path) {
+    let config = match Config::load(&config_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error loading config from {}: {}", config_path.display(), e);
@@ -47,13 +65,28 @@ fn main() {
     };
 
     // Credentials are prompted before entering TUI mode (normal terminal)
-    let _username = prompt("Username: ");
-    let _password = prompt_password("Password: ");
+    let username = prompt("Username: ");
+    let password = prompt_password("Password: ");
 
-    // TODO: JMAP discovery will happen in Phase 2 when we wire up the backend
+    // JMAP session discovery
+    eprint!("Connecting to {}...", config.jmap.well_known_url);
+    io::stderr().flush().ok();
+
+    let (_session, client) =
+        match JmapClient::discover(&config.jmap.well_known_url, &username, &password) {
+            Ok(result) => {
+                eprintln!(" OK");
+                result
+            }
+            Err(e) => {
+                eprintln!(" FAILED");
+                eprintln!("JMAP discovery error: {}", e);
+                std::process::exit(1);
+            }
+        };
 
     // Enter TUI
-    if let Err(e) = tui::run() {
+    if let Err(e) = tui::run(client, config.ui.page_size) {
         eprintln!("TUI error: {}", e);
         std::process::exit(1);
     }
