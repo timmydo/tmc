@@ -1,11 +1,11 @@
 # TODO
 
 ## Phase 0: Project Bootstrap
-- [ ] Initialize Cargo project with `cargo init`
-- [ ] Set up config.toml parsing (server URL)
-- [ ] Port JMAP types from ~/src/rust-jmap-webmail/ (serde types for Session, Mailbox, Email, etc.)
-- [ ] Port JMAP client (HTTP client with Basic auth, discovery, method calls)
-- [ ] Implement simple logging macros (no dependency)
+- [x] Initialize Cargo project with `cargo init`
+- [x] Set up config.toml parsing (server URL)
+- [x] Port JMAP types from ~/src/rust-jmap-webmail/ (serde types for Session, Mailbox, Email, etc.)
+- [x] Port JMAP client (HTTP client with Basic auth, discovery, method calls)
+- [x] Implement simple logging macros (no dependency)
 
 ## Phase 1: Minimal TUI
 - [ ] Raw terminal mode (termios via libc or hand-rolled)
