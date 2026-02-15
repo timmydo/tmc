@@ -1,4 +1,4 @@
-use crate::backend::{BackendCommand, BackendResponse};
+use crate::backend::{BackendCommand, BackendResponse, EmailMutationAction};
 use crate::compose;
 use crate::jmap::types::Mailbox;
 use crate::tui::input::Key;
@@ -341,6 +341,27 @@ impl View for MailboxListView {
                     }
                 }
                 true
+            }
+            BackendResponse::EmailMutation { action, result, .. } => {
+                if result.is_ok()
+                    && matches!(
+                        action,
+                        EmailMutationAction::MarkRead | EmailMutationAction::MarkUnread
+                    )
+                {
+                    self.request_refresh();
+                    true
+                } else {
+                    false
+                }
+            }
+            BackendResponse::ThreadMarkedRead { result, .. } => {
+                if result.is_ok() {
+                    self.request_refresh();
+                    true
+                } else {
+                    false
+                }
             }
             _ => false,
         }

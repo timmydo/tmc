@@ -878,16 +878,31 @@ impl View for EmailListView {
                 result,
             } => {
                 if let Some(pending) = self.pending_write_ops.remove(op_id) {
-                    if let Err(e) = result {
-                        self.rollback_pending_write(pending);
-                        let action_label = match action {
-                            EmailMutationAction::MarkRead => "Mark read",
-                            EmailMutationAction::MarkUnread => "Mark unread",
-                            EmailMutationAction::SetFlagged(_) => "Flag update",
-                            EmailMutationAction::Move => "Move",
-                        };
-                        self.status_message = Some(format!("{} failed: {}", action_label, e));
+                    match result {
+                        Ok(()) => {
+                            if let PendingWriteOp::Seen { .. } = pending {
+                                self.request_refresh();
+                            }
+                        }
+                        Err(e) => {
+                            self.rollback_pending_write(pending);
+                            let action_label = match action {
+                                EmailMutationAction::MarkRead => "Mark read",
+                                EmailMutationAction::MarkUnread => "Mark unread",
+                                EmailMutationAction::SetFlagged(_) => "Flag update",
+                                EmailMutationAction::Move => "Move",
+                            };
+                            self.status_message = Some(format!("{} failed: {}", action_label, e));
+                        }
                     }
+                    true
+                } else {
+                    false
+                }
+            }
+            BackendResponse::ThreadMarkedRead { result, .. } => {
+                if result.is_ok() {
+                    self.request_refresh();
                     true
                 } else {
                     false
