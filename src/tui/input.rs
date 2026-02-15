@@ -17,6 +17,7 @@ pub enum Key {
     End,
     Delete,
     Ctrl(char),
+    AltEnter,
     MouseClick { row: u16, col: u16 },
     ScrollUp,
     ScrollDown,
@@ -52,6 +53,10 @@ fn parse_escape() -> Key {
         Ok(0) => return Key::Escape, // bare escape
         Ok(_) => {}
         Err(_) => return Key::Escape,
+    }
+
+    if buf[0] == 13 {
+        return Key::AltEnter; // ESC followed by Enter
     }
 
     if buf[0] != b'[' {

@@ -57,7 +57,7 @@ pub enum BackendResponse {
         total: Option<u32>,
         position: u32,
         loaded: u32,
-        thread_sizes: HashMap<String, usize>,
+        thread_counts: HashMap<String, (usize, usize)>,
     },
     ThreadEmails {
         thread_id: String,
@@ -138,24 +138,40 @@ fn backend_loop(
                         client.get_emails(&query.ids).map_err(|e| e.to_string())
                     }?;
 
-                    // Build thread sizes map
-                    let mut thread_sizes = HashMap::new();
+                    // Build thread counts map (unread, total)
+                    let mut thread_counts = HashMap::new();
                     let thread_ids: Vec<String> =
                         emails.iter().filter_map(|e| e.thread_id.clone()).collect();
                     if !thread_ids.is_empty() {
                         if let Ok(threads) = client.get_threads(&thread_ids) {
+                            let all_email_ids: Vec<String> =
+                                threads.iter().flat_map(|t| t.email_ids.clone()).collect();
+                            let keyword_emails = client
+                                .get_email_keywords(&all_email_ids)
+                                .unwrap_or_default();
+                            let keyword_map: HashMap<String, bool> = keyword_emails
+                                .iter()
+                                .map(|e| (e.id.clone(), e.keywords.contains_key("$seen")))
+                                .collect();
                             for thread in threads {
-                                thread_sizes.insert(thread.id.clone(), thread.email_ids.len());
+                                let total_count = thread.email_ids.len();
+                                let unread_count = thread
+                                    .email_ids
+                                    .iter()
+                                    .filter(|id| !keyword_map.get(*id).copied().unwrap_or(true))
+                                    .count();
+                                thread_counts
+                                    .insert(thread.id.clone(), (unread_count, total_count));
                             }
                         }
                     }
 
-                    Ok((emails, total, position, loaded, thread_sizes))
+                    Ok((emails, total, position, loaded, thread_counts))
                 })();
 
-                let (emails, total, position, loaded, thread_sizes) = match result {
-                    Ok((emails, total, position, loaded, thread_sizes)) => {
-                        (Ok(emails), total, position, loaded, thread_sizes)
+                let (emails, total, position, loaded, thread_counts) = match result {
+                    Ok((emails, total, position, loaded, thread_counts)) => {
+                        (Ok(emails), total, position, loaded, thread_counts)
                     }
                     Err(e) => (Err(e), None, position, 0, HashMap::new()),
                 };
@@ -166,7 +182,7 @@ fn backend_loop(
                     total,
                     position,
                     loaded,
-                    thread_sizes,
+                    thread_counts,
                 });
             }
             BackendCommand::QueryThreadEmails { thread_id } => {

@@ -651,6 +651,44 @@ impl JmapClient {
         Err(JmapError::Http("Too many redirects".to_string()))
     }
 
+    pub fn get_email_keywords(&self, ids: &[String]) -> Result<Vec<Email>, JmapError> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        log_info!("[JMAP] Email/get keywords for {} email IDs", ids.len());
+
+        let request = JmapRequest {
+            using: vec!["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            method_calls: vec![MethodCall(
+                "Email/get",
+                json!({
+                    "accountId": self.account_id,
+                    "ids": ids,
+                    "properties": ["id", "keywords"]
+                }),
+                "0".to_string(),
+            )],
+        };
+
+        let response = self.call(request)?;
+
+        if let Some(method_response) = response.method_responses.first() {
+            if method_response.0 == "Email/get" {
+                let email_response: EmailGetResponse =
+                    serde_json::from_value(method_response.1.clone())
+                        .map_err(|e| JmapError::Parse(e.to_string()))?;
+                log_info!(
+                    "[JMAP] Email/get keywords returned {} emails",
+                    email_response.list.len()
+                );
+                return Ok(email_response.list);
+            }
+        }
+
+        Err(JmapError::Api("Unexpected response".to_string()))
+    }
+
     pub fn get_threads(&self, ids: &[String]) -> Result<Vec<super::types::Thread>, JmapError> {
         if ids.is_empty() {
             return Ok(vec![]);

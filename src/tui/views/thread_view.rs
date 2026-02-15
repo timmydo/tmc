@@ -24,6 +24,7 @@ pub struct ThreadView {
     cursor: usize,
     loading: bool,
     error: Option<String>,
+    scroll_offset: usize,
     pending_click: bool,
     status_message: Option<String>,
     next_write_op_id: u64,
@@ -49,6 +50,7 @@ impl ThreadView {
             cursor: 0,
             loading: true,
             error: None,
+            scroll_offset: 0,
             pending_click: false,
             status_message: None,
             next_write_op_id: 1,
@@ -179,9 +181,21 @@ impl ThreadView {
 
     fn request_refresh(&mut self) {
         self.loading = true;
+        self.scroll_offset = 0;
         let _ = self.cmd_tx.send(BackendCommand::QueryThreadEmails {
             thread_id: self.thread_id.clone(),
         });
+    }
+
+    fn adjust_scroll(&mut self, max_items: usize) {
+        if max_items == 0 {
+            return;
+        }
+        if self.cursor < self.scroll_offset {
+            self.scroll_offset = self.cursor;
+        } else if self.cursor >= self.scroll_offset + max_items {
+            self.scroll_offset = self.cursor - max_items + 1;
+        }
     }
 }
 
@@ -226,23 +240,18 @@ impl View for ThreadView {
             term.write_truncated("No messages in thread.", term.cols)?;
         } else {
             let max_items = (term.rows as usize).saturating_sub(4);
-            let scroll_offset = if self.cursor >= max_items {
-                self.cursor - max_items + 1
-            } else {
-                0
-            };
 
             for (i, email) in self
                 .emails
                 .iter()
-                .skip(scroll_offset)
+                .skip(self.scroll_offset)
                 .enumerate()
                 .take(max_items)
             {
                 let row = 3 + i as u16;
                 term.move_to(row, 1)?;
 
-                let display_idx = scroll_offset + i;
+                let display_idx = self.scroll_offset + i;
                 let line = Self::format_email(email, term.cols);
 
                 if display_idx == self.cursor {
@@ -289,38 +298,45 @@ impl View for ThreadView {
     }
 
     fn handle_key(&mut self, key: Key, term_rows: u16) -> ViewAction {
-        let page = (term_rows as usize).saturating_sub(4);
+        let max_items = (term_rows as usize).saturating_sub(4);
+        let page = max_items;
         match key {
             Key::Char('q') => ViewAction::Pop,
             Key::Char('n') | Key::Char('j') | Key::Down => {
                 if !self.emails.is_empty() && self.cursor + 1 < self.emails.len() {
                     self.cursor += 1;
+                    self.adjust_scroll(max_items);
                 }
                 ViewAction::Continue
             }
             Key::Char('p') | Key::Char('k') | Key::Up => {
                 if self.cursor > 0 {
                     self.cursor -= 1;
+                    self.adjust_scroll(max_items);
                 }
                 ViewAction::Continue
             }
             Key::PageDown => {
                 if !self.emails.is_empty() {
                     self.cursor = (self.cursor + page).min(self.emails.len() - 1);
+                    self.adjust_scroll(max_items);
                 }
                 ViewAction::Continue
             }
             Key::PageUp => {
                 self.cursor = self.cursor.saturating_sub(page);
+                self.adjust_scroll(max_items);
                 ViewAction::Continue
             }
             Key::Home => {
                 self.cursor = 0;
+                self.adjust_scroll(max_items);
                 ViewAction::Continue
             }
             Key::End => {
                 if !self.emails.is_empty() {
                     self.cursor = self.emails.len() - 1;
+                    self.adjust_scroll(max_items);
                 }
                 ViewAction::Continue
             }
@@ -396,24 +412,20 @@ impl View for ThreadView {
             Key::ScrollUp => {
                 if self.cursor > 0 {
                     self.cursor -= 1;
+                    self.adjust_scroll(max_items);
                 }
                 ViewAction::Continue
             }
             Key::ScrollDown => {
                 if !self.emails.is_empty() && self.cursor + 1 < self.emails.len() {
                     self.cursor += 1;
+                    self.adjust_scroll(max_items);
                 }
                 ViewAction::Continue
             }
             Key::MouseClick { row, col: _ } => {
                 if row >= 3 && !self.emails.is_empty() {
-                    let max_items = (term_rows as usize).saturating_sub(4);
-                    let scroll_offset = if self.cursor >= max_items {
-                        self.cursor - max_items + 1
-                    } else {
-                        0
-                    };
-                    let clicked = scroll_offset + (row - 3) as usize;
+                    let clicked = self.scroll_offset + (row - 3) as usize;
                     if clicked < self.emails.len() {
                         self.cursor = clicked;
                         self.pending_click = true;

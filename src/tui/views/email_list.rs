@@ -50,7 +50,8 @@ pub struct EmailListView {
     status_message: Option<String>,
     next_write_op_id: u64,
     pending_write_ops: HashMap<u64, PendingWriteOp>,
-    thread_sizes: HashMap<String, usize>,
+    thread_counts: HashMap<String, (usize, usize)>,
+    scroll_offset: usize,
 }
 
 impl EmailListView {
@@ -86,7 +87,8 @@ impl EmailListView {
             status_message: None,
             next_write_op_id: 1,
             pending_write_ops: HashMap::new(),
-            thread_sizes: HashMap::new(),
+            thread_counts: HashMap::new(),
+            scroll_offset: 0,
         }
     }
 
@@ -95,6 +97,7 @@ impl EmailListView {
         self.last_loaded_count = 0;
         self.loading = true;
         self.loading_more = false;
+        self.scroll_offset = 0;
         let _ = self.cmd_tx.send(BackendCommand::QueryEmails {
             mailbox_id: self.mailbox_id.clone(),
             page_size: self.page_size,
@@ -146,13 +149,18 @@ impl EmailListView {
         email.keywords.contains_key("$flagged")
     }
 
-    fn format_email(email: &Email, width: u16, thread_size: Option<usize>) -> String {
+    fn format_email(email: &Email, width: u16, thread_counts: Option<(usize, usize)>) -> String {
         let unread = if Self::is_unread(email) { "N" } else { " " };
         let flagged = if Self::is_flagged(email) { "F" } else { " " };
-        let thread_indicator = match thread_size {
-            Some(n) if n > 1 => format!("[{}]", n),
+
+        // Fixed 8-char column for thread indicator
+        let thread_col = match thread_counts {
+            Some((unread_count, total)) if total > 1 => {
+                format!("[{}/{}]", unread_count, total)
+            }
             _ => String::new(),
         };
+        let thread_display = format!("{:<8}", thread_col);
 
         let from = email
             .from
@@ -174,43 +182,31 @@ impl EmailListView {
             .unwrap_or("");
 
         let w = width as usize;
-        let prefix_len =
-            4 + thread_indicator.len() + if thread_indicator.is_empty() { 0 } else { 1 };
-        let from_width = 20.min(w.saturating_sub(15 + prefix_len));
-        let subj_width = w.saturating_sub(15 + prefix_len + from_width);
+        // " NF" (4) + thread_display (8) + date (10) + " " (1) + from + " " (1) + subject
+        let prefix_len = 4 + 8 + 10 + 1;
+        let from_width = 20.min(w.saturating_sub(prefix_len + 1));
+        let subj_width = w.saturating_sub(prefix_len + from_width + 1);
 
         let from_display = truncate(from, from_width);
         let subj_display = truncate(subject, subj_width);
 
-        if thread_indicator.is_empty() {
-            format!(
-                " {}{} {} {:from_w$} {}",
-                unread,
-                flagged,
-                date,
-                from_display,
-                subj_display,
-                from_w = from_width
-            )
-        } else {
-            format!(
-                " {}{}{} {} {:from_w$} {}",
-                unread,
-                flagged,
-                thread_indicator,
-                date,
-                from_display,
-                subj_display,
-                from_w = from_width
-            )
-        }
+        format!(
+            " {}{}{}{} {:from_w$} {}",
+            unread,
+            flagged,
+            thread_display,
+            date,
+            from_display,
+            subj_display,
+            from_w = from_width
+        )
     }
 
-    fn get_thread_size(&self, email: &Email) -> Option<usize> {
+    fn get_thread_counts(&self, email: &Email) -> Option<(usize, usize)> {
         email
             .thread_id
             .as_ref()
-            .and_then(|tid| self.thread_sizes.get(tid))
+            .and_then(|tid| self.thread_counts.get(tid))
             .copied()
     }
 
@@ -262,11 +258,38 @@ impl EmailListView {
 
     fn open_selected(&mut self) -> Option<ViewAction> {
         let email = self.emails.get(self.cursor)?;
-        let email_id = email.id.clone();
-        let thread_size = self.get_thread_size(email).unwrap_or(1);
+        let thread_total = self
+            .get_thread_counts(email)
+            .map(|(_, total)| total)
+            .unwrap_or(1);
 
-        if thread_size > 1 {
-            // Open thread view
+        if thread_total > 1 {
+            // Open concatenated thread reading view
+            let thread_id = email.thread_id.clone().unwrap_or_default();
+            let subject = email
+                .subject
+                .clone()
+                .unwrap_or_else(|| "(no subject)".to_string());
+            let view = EmailView::new_thread(
+                self.cmd_tx.clone(),
+                self.from_address.clone(),
+                thread_id,
+                subject,
+            );
+            Some(ViewAction::Push(Box::new(view)))
+        } else {
+            self.open_single_email()
+        }
+    }
+
+    fn open_thread_list(&mut self) -> Option<ViewAction> {
+        let email = self.emails.get(self.cursor)?;
+        let thread_total = self
+            .get_thread_counts(email)
+            .map(|(_, total)| total)
+            .unwrap_or(1);
+
+        if thread_total > 1 {
             let thread_id = email.thread_id.clone().unwrap_or_default();
             let subject = email
                 .subject
@@ -280,49 +303,65 @@ impl EmailListView {
             );
             Some(ViewAction::Push(Box::new(view)))
         } else {
-            // Open single email view
-            let was_seen = email.keywords.contains_key("$seen");
-            let view = EmailView::new(
-                self.cmd_tx.clone(),
-                self.from_address.clone(),
-                email_id.clone(),
+            self.open_single_email()
+        }
+    }
+
+    fn open_single_email(&mut self) -> Option<ViewAction> {
+        let email = self.emails.get(self.cursor)?;
+        let email_id = email.id.clone();
+        let was_seen = email.keywords.contains_key("$seen");
+        let view = EmailView::new(
+            self.cmd_tx.clone(),
+            self.from_address.clone(),
+            email_id.clone(),
+        );
+        let _ = self.cmd_tx.send(BackendCommand::GetEmail {
+            id: email_id.clone(),
+        });
+        if !was_seen {
+            let op_id = self.next_op_id();
+            self.pending_write_ops.insert(
+                op_id,
+                PendingWriteOp::Seen {
+                    email_id: email_id.clone(),
+                    old_seen: false,
+                },
             );
-            let _ = self.cmd_tx.send(BackendCommand::GetEmail {
+            self.set_email_seen_state(&email_id, true);
+            if let Err(e) = self.cmd_tx.send(BackendCommand::MarkEmailRead {
+                op_id,
                 id: email_id.clone(),
-            });
-            if !was_seen {
-                let op_id = self.next_op_id();
-                self.pending_write_ops.insert(
+            }) {
+                self.record_send_failure(
                     op_id,
                     PendingWriteOp::Seen {
-                        email_id: email_id.clone(),
+                        email_id,
                         old_seen: false,
                     },
+                    "Mark read",
+                    e.to_string(),
                 );
-                self.set_email_seen_state(&email_id, true);
-                if let Err(e) = self.cmd_tx.send(BackendCommand::MarkEmailRead {
-                    op_id,
-                    id: email_id.clone(),
-                }) {
-                    self.record_send_failure(
-                        op_id,
-                        PendingWriteOp::Seen {
-                            email_id,
-                            old_seen: false,
-                        },
-                        "Mark read",
-                        e.to_string(),
-                    );
-                }
             }
-            Some(ViewAction::Push(Box::new(view)))
         }
+        Some(ViewAction::Push(Box::new(view)))
     }
 
     fn record_send_failure(&mut self, op_id: u64, op: PendingWriteOp, action: &str, err: String) {
         self.pending_write_ops.remove(&op_id);
         self.rollback_pending_write(op);
         self.status_message = Some(format!("{} failed: {}", action, err));
+    }
+
+    fn adjust_scroll(&mut self, max_items: usize) {
+        if max_items == 0 {
+            return;
+        }
+        if self.cursor < self.scroll_offset {
+            self.scroll_offset = self.cursor;
+        } else if self.cursor >= self.scroll_offset + max_items {
+            self.scroll_offset = self.cursor - max_items + 1;
+        }
     }
 }
 
@@ -414,25 +453,20 @@ impl View for EmailListView {
             term.write_truncated("No messages.", term.cols)?;
         } else {
             let max_items = (term.rows as usize).saturating_sub(4);
-            let scroll_offset = if self.cursor >= max_items {
-                self.cursor - max_items + 1
-            } else {
-                0
-            };
 
             for (i, email) in self
                 .emails
                 .iter()
-                .skip(scroll_offset)
+                .skip(self.scroll_offset)
                 .enumerate()
                 .take(max_items)
             {
                 let row = 3 + i as u16;
                 term.move_to(row, 1)?;
 
-                let display_idx = scroll_offset + i;
-                let thread_size = self.get_thread_size(email);
-                let line = Self::format_email(email, term.cols, thread_size);
+                let display_idx = self.scroll_offset + i;
+                let thread_counts = self.get_thread_counts(email);
+                let line = Self::format_email(email, term.cols, thread_counts);
 
                 if display_idx == self.cursor {
                     term.set_reverse()?;
@@ -600,12 +634,14 @@ impl View for EmailListView {
         }
 
         // Normal mode
-        let page = (term_rows as usize).saturating_sub(4);
+        let max_items = (term_rows as usize).saturating_sub(4);
+        let page = max_items;
         match key {
             Key::Char('q') => ViewAction::Pop,
             Key::Char('n') | Key::Char('j') | Key::Down => {
                 if !self.emails.is_empty() && self.cursor + 1 < self.emails.len() {
                     self.cursor += 1;
+                    self.adjust_scroll(max_items);
                 } else {
                     self.request_load_more();
                 }
@@ -614,12 +650,14 @@ impl View for EmailListView {
             Key::Char('p') | Key::Char('k') | Key::Up => {
                 if self.cursor > 0 {
                     self.cursor -= 1;
+                    self.adjust_scroll(max_items);
                 }
                 ViewAction::Continue
             }
             Key::PageDown => {
                 if !self.emails.is_empty() {
                     self.cursor = (self.cursor + page).min(self.emails.len() - 1);
+                    self.adjust_scroll(max_items);
                     if self.cursor + 1 >= self.emails.len() {
                         self.request_load_more();
                     }
@@ -628,20 +666,24 @@ impl View for EmailListView {
             }
             Key::PageUp => {
                 self.cursor = self.cursor.saturating_sub(page);
+                self.adjust_scroll(max_items);
                 ViewAction::Continue
             }
             Key::Home => {
                 self.cursor = 0;
+                self.adjust_scroll(max_items);
                 ViewAction::Continue
             }
             Key::End => {
                 if !self.emails.is_empty() {
                     self.cursor = self.emails.len() - 1;
+                    self.adjust_scroll(max_items);
                     self.request_load_more();
                 }
                 ViewAction::Continue
             }
             Key::Enter => self.open_selected().unwrap_or(ViewAction::Continue),
+            Key::AltEnter => self.open_thread_list().unwrap_or(ViewAction::Continue),
             Key::Char('g') => {
                 self.request_refresh();
                 ViewAction::Continue
@@ -745,12 +787,14 @@ impl View for EmailListView {
             Key::ScrollUp => {
                 if self.cursor > 0 {
                     self.cursor -= 1;
+                    self.adjust_scroll(max_items);
                 }
                 ViewAction::Continue
             }
             Key::ScrollDown => {
                 if !self.emails.is_empty() && self.cursor + 1 < self.emails.len() {
                     self.cursor += 1;
+                    self.adjust_scroll(max_items);
                 } else {
                     self.request_load_more();
                 }
@@ -758,13 +802,7 @@ impl View for EmailListView {
             }
             Key::MouseClick { row, col: _ } => {
                 if row >= 3 && !self.emails.is_empty() {
-                    let max_items = (term_rows as usize).saturating_sub(4);
-                    let scroll_offset = if self.cursor >= max_items {
-                        self.cursor - max_items + 1
-                    } else {
-                        0
-                    };
-                    let clicked = scroll_offset + (row - 3) as usize;
+                    let clicked = self.scroll_offset + (row - 3) as usize;
                     if clicked < self.emails.len() {
                         self.cursor = clicked;
                         self.pending_click = true;
@@ -793,7 +831,7 @@ impl View for EmailListView {
                 total,
                 position,
                 loaded,
-                thread_sizes,
+                thread_counts,
             } if *mailbox_id == self.mailbox_id => {
                 self.loading = false;
                 self.loading_more = false;
@@ -805,10 +843,10 @@ impl View for EmailListView {
                         if *position == 0 {
                             self.emails = emails.clone();
                             self.pending_write_ops.clear();
-                            self.thread_sizes = thread_sizes.clone();
+                            self.thread_counts = thread_counts.clone();
                         } else {
-                            self.thread_sizes
-                                .extend(thread_sizes.iter().map(|(k, v)| (k.clone(), *v)));
+                            self.thread_counts
+                                .extend(thread_counts.iter().map(|(k, v)| (k.clone(), *v)));
                             let mut existing_ids: HashSet<String> =
                                 self.emails.iter().map(|e| e.id.clone()).collect();
                             for email in emails {

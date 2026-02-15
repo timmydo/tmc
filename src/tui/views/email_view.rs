@@ -39,6 +39,8 @@ pub struct EmailView {
     next_write_op_id: u64,
     pending_write_ops: HashMap<u64, PendingWriteOp>,
     attachment_picking: bool,
+    thread_id: Option<String>,
+    thread_emails: Vec<Email>,
 }
 
 impl EmailView {
@@ -62,6 +64,37 @@ impl EmailView {
             next_write_op_id: 1,
             pending_write_ops: HashMap::new(),
             attachment_picking: false,
+            thread_id: None,
+            thread_emails: Vec::new(),
+        }
+    }
+
+    pub fn new_thread(
+        cmd_tx: mpsc::Sender<BackendCommand>,
+        from_address: String,
+        thread_id: String,
+        _subject: String,
+    ) -> Self {
+        let _ = cmd_tx.send(BackendCommand::QueryThreadEmails {
+            thread_id: thread_id.clone(),
+        });
+        EmailView {
+            cmd_tx,
+            from_address,
+            email_id: String::new(),
+            email: None,
+            lines: Vec::new(),
+            scroll: 0,
+            loading: true,
+            error: None,
+            pending_reply_all: None,
+            pending_compose: None,
+            status_message: None,
+            next_write_op_id: 1,
+            pending_write_ops: HashMap::new(),
+            attachment_picking: false,
+            thread_id: Some(thread_id),
+            thread_emails: Vec::new(),
         }
     }
 
@@ -115,6 +148,45 @@ impl EmailView {
             lines.push(line.to_string());
         }
 
+        lines
+    }
+
+    fn render_thread_emails(emails: &[Email]) -> Vec<String> {
+        let mut lines = Vec::new();
+        for (i, email) in emails.iter().enumerate() {
+            if i > 0 {
+                lines.push(String::new());
+                lines.push("─".repeat(60));
+                lines.push(String::new());
+            }
+            // Headers for each email in thread
+            if let Some(ref from) = email.from {
+                let addrs: Vec<String> = from.iter().map(|a| a.to_string()).collect();
+                lines.push(format!("From: {}", addrs.join(", ")));
+            }
+            if let Some(ref to) = email.to {
+                let addrs: Vec<String> = to.iter().map(|a| a.to_string()).collect();
+                lines.push(format!("To: {}", addrs.join(", ")));
+            }
+            if let Some(ref cc) = email.cc {
+                if !cc.is_empty() {
+                    let addrs: Vec<String> = cc.iter().map(|a| a.to_string()).collect();
+                    lines.push(format!("Cc: {}", addrs.join(", ")));
+                }
+            }
+            if let Some(ref date) = email.received_at {
+                lines.push(format!("Date: {}", date));
+            }
+            lines.push(format!(
+                "Subject: {}",
+                email.subject.as_deref().unwrap_or("(no subject)")
+            ));
+            lines.push(String::new());
+            let body_text = Self::extract_body(email);
+            for line in body_text.lines() {
+                lines.push(line.to_string());
+            }
+        }
         lines
     }
 
@@ -219,7 +291,12 @@ impl View for EmailView {
 
         if self.loading {
             term.move_to(1, 1)?;
-            term.write_truncated("Loading email...", term.cols)?;
+            let load_msg = if self.thread_id.is_some() {
+                "Loading thread..."
+            } else {
+                "Loading email..."
+            };
+            term.write_truncated(load_msg, term.cols)?;
             term.move_to(term.rows, 1)?;
             term.set_reverse()?;
             term.write_truncated(" Loading... | q:back", term.cols)?;
@@ -450,6 +527,26 @@ impl View for EmailView {
 
     fn on_response(&mut self, response: &BackendResponse) -> bool {
         match response {
+            BackendResponse::ThreadEmails { thread_id, emails }
+                if self.thread_id.as_deref() == Some(thread_id) =>
+            {
+                self.loading = false;
+                match emails {
+                    Ok(emails) => {
+                        self.thread_emails = emails.clone();
+                        if let Some(last) = emails.last() {
+                            self.email_id = last.id.clone();
+                            self.email = Some(last.clone());
+                        }
+                        self.lines = Self::render_thread_emails(&self.thread_emails);
+                        self.error = None;
+                    }
+                    Err(e) => {
+                        self.error = Some(format!("Failed to load thread: {}", e));
+                    }
+                }
+                true
+            }
             BackendResponse::EmailBody { id, result } if *id == self.email_id => {
                 self.loading = false;
                 match result.as_ref() {
