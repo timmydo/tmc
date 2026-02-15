@@ -57,11 +57,12 @@ pub struct MethodCall(pub &'static str, pub serde_json::Value, pub String);
 pub struct JmapResponse {
     pub method_responses: Vec<MethodResponse>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub session_state: String,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct MethodResponse(pub String, pub serde_json::Value, pub String);
+pub struct MethodResponse(pub String, pub serde_json::Value, #[allow(dead_code)] pub String);
 
 // Mailbox types
 #[derive(Debug, Deserialize, Clone)]
@@ -84,10 +85,13 @@ pub struct Mailbox {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MailboxGetResponse {
+    #[allow(dead_code)]
     pub account_id: String,
+    #[allow(dead_code)]
     pub state: String,
     pub list: Vec<Mailbox>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub not_found: Vec<String>,
 }
 
@@ -95,7 +99,9 @@ pub struct MailboxGetResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EmailQueryResponse {
+    #[allow(dead_code)]
     pub account_id: String,
+    #[allow(dead_code)]
     pub query_state: String,
     pub ids: Vec<String>,
     #[serde(default)]
@@ -183,9 +189,12 @@ pub struct BodyValue {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EmailGetResponse {
+    #[allow(dead_code)]
     pub account_id: String,
+    #[allow(dead_code)]
     pub state: String,
     pub list: Vec<Email>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub not_found: Vec<String>,
 }

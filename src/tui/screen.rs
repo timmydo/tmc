@@ -88,6 +88,7 @@ impl Terminal {
         write!(self.out, "\x1b[{};{}H", row, col)
     }
 
+    #[allow(dead_code)]
     pub fn clear_line(&mut self) -> io::Result<()> {
         write!(self.out, "\x1b[K")
     }

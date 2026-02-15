@@ -2,7 +2,6 @@ use base64::Engine;
 use serde_json::json;
 
 use super::types::*;
-use crate::{log_debug, log_error, log_info, log_warn};
 
 pub struct JmapClient {
     username: String,
