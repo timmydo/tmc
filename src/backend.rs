@@ -40,6 +40,10 @@ pub enum BackendCommand {
     QueryThreadEmails {
         thread_id: String,
     },
+    MarkThreadRead {
+        thread_id: String,
+        email_ids: Vec<String>,
+    },
     DownloadAttachment {
         blob_id: String,
         name: String,
@@ -75,6 +79,12 @@ pub enum BackendResponse {
         op_id: u64,
         id: String,
         action: EmailMutationAction,
+        result: Result<(), String>,
+    },
+    ThreadMarkedRead {
+        #[allow(dead_code)]
+        thread_id: String,
+        #[allow(dead_code)]
         result: Result<(), String>,
     },
     AttachmentDownloaded {
@@ -271,6 +281,15 @@ fn backend_loop(
                     action: EmailMutationAction::Move,
                     result,
                 });
+            }
+            BackendCommand::MarkThreadRead {
+                thread_id,
+                email_ids,
+            } => {
+                let result = client
+                    .mark_emails_read(&email_ids)
+                    .map_err(|e| e.to_string());
+                let _ = resp_tx.send(BackendResponse::ThreadMarkedRead { thread_id, result });
             }
             BackendCommand::DownloadAttachment {
                 blob_id,

@@ -9,6 +9,13 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::mpsc;
 
+#[derive(Clone, Copy, PartialEq)]
+enum LineKind {
+    Header,
+    Separator,
+    Body,
+}
+
 fn format_size(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{} B", bytes)
@@ -30,6 +37,7 @@ pub struct EmailView {
     email_id: String,
     email: Option<Email>,
     lines: Vec<String>,
+    line_kinds: Vec<LineKind>,
     scroll: usize,
     loading: bool,
     error: Option<String>,
@@ -55,6 +63,7 @@ impl EmailView {
             email_id,
             email: None,
             lines: Vec::new(),
+            line_kinds: Vec::new(),
             scroll: 0,
             loading: true,
             error: None,
@@ -84,6 +93,7 @@ impl EmailView {
             email_id: String::new(),
             email: None,
             lines: Vec::new(),
+            line_kinds: Vec::new(),
             scroll: 0,
             loading: true,
             error: None,
@@ -98,96 +108,119 @@ impl EmailView {
         }
     }
 
-    fn render_email(email: &Email) -> Vec<String> {
+    fn render_email(email: &Email) -> (Vec<String>, Vec<LineKind>) {
         let mut lines = Vec::new();
+        let mut kinds = Vec::new();
 
         // Headers
         if let Some(ref from) = email.from {
             let addrs: Vec<String> = from.iter().map(|a| a.to_string()).collect();
             lines.push(format!("From: {}", addrs.join(", ")));
+            kinds.push(LineKind::Header);
         }
         if let Some(ref to) = email.to {
             let addrs: Vec<String> = to.iter().map(|a| a.to_string()).collect();
             lines.push(format!("To: {}", addrs.join(", ")));
+            kinds.push(LineKind::Header);
         }
         if let Some(ref cc) = email.cc {
             if !cc.is_empty() {
                 let addrs: Vec<String> = cc.iter().map(|a| a.to_string()).collect();
                 lines.push(format!("Cc: {}", addrs.join(", ")));
+                kinds.push(LineKind::Header);
             }
         }
         if let Some(ref date) = email.received_at {
             lines.push(format!("Date: {}", date));
+            kinds.push(LineKind::Header);
         }
         lines.push(format!(
             "Subject: {}",
             email.subject.as_deref().unwrap_or("(no subject)")
         ));
+        kinds.push(LineKind::Header);
 
         // Attachments
         if let Some(ref attachments) = email.attachments {
             if !attachments.is_empty() {
                 lines.push(String::new());
+                kinds.push(LineKind::Body);
                 lines.push(format!("Attachments ({})", attachments.len()));
+                kinds.push(LineKind::Body);
                 for (i, att) in attachments.iter().enumerate() {
                     let name = att.name.as_deref().unwrap_or("unnamed");
                     let size = att.size.map(format_size).unwrap_or_default();
                     let type_str = att.r#type.as_deref().unwrap_or("application/octet-stream");
                     lines.push(format!("  [{}] {} ({}, {})", i + 1, name, type_str, size));
+                    kinds.push(LineKind::Body);
                 }
                 lines.push("  Press 'a' then 1-9 to download/open".to_string());
+                kinds.push(LineKind::Body);
             }
         }
 
         // Separator
         lines.push(String::new());
+        kinds.push(LineKind::Body);
 
         // Body
         let body_text = Self::extract_body(email);
         for line in body_text.lines() {
             lines.push(line.to_string());
+            kinds.push(LineKind::Body);
         }
 
-        lines
+        (lines, kinds)
     }
 
-    fn render_thread_emails(emails: &[Email]) -> Vec<String> {
+    fn render_thread_emails(emails: &[Email]) -> (Vec<String>, Vec<LineKind>) {
         let mut lines = Vec::new();
+        let mut kinds = Vec::new();
         for (i, email) in emails.iter().enumerate() {
             if i > 0 {
                 lines.push(String::new());
-                lines.push("─".repeat(60));
+                kinds.push(LineKind::Body);
                 lines.push(String::new());
+                kinds.push(LineKind::Separator);
+                lines.push(String::new());
+                kinds.push(LineKind::Body);
             }
             // Headers for each email in thread
             if let Some(ref from) = email.from {
                 let addrs: Vec<String> = from.iter().map(|a| a.to_string()).collect();
                 lines.push(format!("From: {}", addrs.join(", ")));
+                kinds.push(LineKind::Header);
             }
             if let Some(ref to) = email.to {
                 let addrs: Vec<String> = to.iter().map(|a| a.to_string()).collect();
                 lines.push(format!("To: {}", addrs.join(", ")));
+                kinds.push(LineKind::Header);
             }
             if let Some(ref cc) = email.cc {
                 if !cc.is_empty() {
                     let addrs: Vec<String> = cc.iter().map(|a| a.to_string()).collect();
                     lines.push(format!("Cc: {}", addrs.join(", ")));
+                    kinds.push(LineKind::Header);
                 }
             }
             if let Some(ref date) = email.received_at {
                 lines.push(format!("Date: {}", date));
+                kinds.push(LineKind::Header);
             }
             lines.push(format!(
                 "Subject: {}",
                 email.subject.as_deref().unwrap_or("(no subject)")
             ));
+            kinds.push(LineKind::Header);
             lines.push(String::new());
+            kinds.push(LineKind::Body);
             let body_text = Self::extract_body(email);
             for line in body_text.lines() {
                 lines.push(line.to_string());
+                kinds.push(LineKind::Body);
             }
         }
-        lines
+        (lines, kinds)
     }
 
     fn extract_body(email: &Email) -> String {
@@ -334,17 +367,29 @@ impl View for EmailView {
             let row = 1 + i as u16;
             term.move_to(row, 1)?;
 
-            // Bold headers (lines before the first empty line)
             let abs_idx = self.scroll + i;
-            let is_header =
-                abs_idx < self.lines.len() && self.lines[..abs_idx].iter().all(|l| !l.is_empty());
+            let kind = self
+                .line_kinds
+                .get(abs_idx)
+                .copied()
+                .unwrap_or(LineKind::Body);
 
-            if is_header && !line.is_empty() {
-                term.set_bold()?;
-                term.write_truncated(line, term.cols)?;
-                term.reset_attr()?;
-            } else {
-                term.write_truncated(line, term.cols)?;
+            match kind {
+                LineKind::Header => {
+                    term.set_bold()?;
+                    term.write_truncated(line, term.cols)?;
+                    term.reset_attr()?;
+                }
+                LineKind::Separator => {
+                    // White background bar spanning entire width
+                    term.set_reverse()?;
+                    let pad = " ".repeat(term.cols as usize);
+                    term.write_str(&pad)?;
+                    term.reset_attr()?;
+                }
+                LineKind::Body => {
+                    term.write_truncated(line, term.cols)?;
+                }
             }
         }
 
@@ -538,8 +583,22 @@ impl View for EmailView {
                             self.email_id = last.id.clone();
                             self.email = Some(last.clone());
                         }
-                        self.lines = Self::render_thread_emails(&self.thread_emails);
+                        let (lines, kinds) = Self::render_thread_emails(&self.thread_emails);
+                        self.lines = lines;
+                        self.line_kinds = kinds;
                         self.error = None;
+                        // Mark all unread thread emails as read
+                        let unread_ids: Vec<String> = emails
+                            .iter()
+                            .filter(|e| !e.keywords.contains_key("$seen"))
+                            .map(|e| e.id.clone())
+                            .collect();
+                        if !unread_ids.is_empty() {
+                            let _ = self.cmd_tx.send(BackendCommand::MarkThreadRead {
+                                thread_id: thread_id.clone(),
+                                email_ids: unread_ids,
+                            });
+                        }
                     }
                     Err(e) => {
                         self.error = Some(format!("Failed to load thread: {}", e));
@@ -547,11 +606,17 @@ impl View for EmailView {
                 }
                 true
             }
+            BackendResponse::ThreadMarkedRead { .. } => {
+                // Silently consume; no UI update needed
+                false
+            }
             BackendResponse::EmailBody { id, result } if *id == self.email_id => {
                 self.loading = false;
                 match result.as_ref() {
                     Ok(email) => {
-                        self.lines = Self::render_email(email);
+                        let (lines, kinds) = Self::render_email(email);
+                        self.lines = lines;
+                        self.line_kinds = kinds;
                         self.email = Some(email.clone());
                         self.error = None;
                         self.pending_write_ops.clear();

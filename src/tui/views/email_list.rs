@@ -153,10 +153,11 @@ impl EmailListView {
         let unread = if Self::is_unread(email) { "N" } else { " " };
         let flagged = if Self::is_flagged(email) { "F" } else { " " };
 
-        // Fixed 8-char column for thread indicator
+        // Fixed 8-char column for thread indicator [read/total]
         let thread_col = match thread_counts {
             Some((unread_count, total)) if total > 1 => {
-                format!("[{}/{}]", unread_count, total)
+                let read_count = total - unread_count;
+                format!("[{}/{}]", read_count, total)
             }
             _ => String::new(),
         };
