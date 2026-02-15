@@ -13,10 +13,11 @@ pub struct Terminal {
     out: BufWriter<Stdout>,
     pub rows: u16,
     pub cols: u16,
+    mouse: bool,
 }
 
 impl Terminal {
-    pub fn new() -> io::Result<Self> {
+    pub fn new(mouse: bool) -> io::Result<Self> {
         let stdin_fd = io::stdin().as_raw_fd();
 
         // Save original termios
@@ -52,6 +53,10 @@ impl Terminal {
         let mut out = BufWriter::new(io::stdout());
         // Enter alternate screen buffer, hide cursor
         write!(out, "\x1b[?1049h\x1b[?25l")?;
+        if mouse {
+            // Enable X10 mouse tracking + SGR extended coordinates
+            write!(out, "\x1b[?1000h\x1b[?1006h")?;
+        }
         out.flush()?;
 
         Ok(Terminal {
@@ -59,6 +64,7 @@ impl Terminal {
             out,
             rows,
             cols,
+            mouse,
         })
     }
 
@@ -124,6 +130,10 @@ impl Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
+        if self.mouse {
+            // Disable mouse tracking
+            let _ = write!(self.out, "\x1b[?1000l\x1b[?1006l");
+        }
         // Show cursor, exit alternate screen
         let _ = write!(self.out, "\x1b[?25h\x1b[?1049l");
         let _ = self.out.flush();

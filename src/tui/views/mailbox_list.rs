@@ -260,6 +260,22 @@ impl View for MailboxListView {
                 }
             }
             Key::Char('?') => ViewAction::Push(Box::new(HelpView::new())),
+            Key::MouseClick { row, col: _ } => {
+                if row >= 3 && !self.mailboxes.is_empty() {
+                    let max_items = (term_rows as usize).saturating_sub(4);
+                    let scroll_offset = if self.cursor >= max_items {
+                        self.cursor - max_items + 1
+                    } else {
+                        0
+                    };
+                    let clicked = scroll_offset + (row - 3) as usize;
+                    if clicked < self.mailboxes.len() {
+                        self.cursor = clicked;
+                        return self.handle_key(Key::Enter, term_rows);
+                    }
+                }
+                ViewAction::Continue
+            }
             _ => ViewAction::Continue,
         }
     }

@@ -17,6 +17,7 @@ pub enum Key {
     End,
     Delete,
     Ctrl(char),
+    MouseClick { row: u16, col: u16 },
 }
 
 /// Read a single keypress from stdin.
@@ -91,6 +92,59 @@ fn parse_escape() -> Key {
                 Err(_) => Key::Escape,
             }
         }
+        // SGR mouse: ESC [ < ...
+        b'<' => parse_sgr_mouse(),
         _ => Key::Escape,
+    }
+}
+
+fn parse_sgr_mouse() -> Key {
+    // SGR format: ESC [ < btn ; col ; row M (press) or m (release)
+    let mut params = [0u16; 3];
+    let mut param_idx = 0;
+    let mut buf = [0u8; 1];
+
+    loop {
+        match io::stdin().read(&mut buf) {
+            Ok(0) | Err(_) => return Key::Escape,
+            Ok(_) => {}
+        }
+        match buf[0] {
+            b'0'..=b'9' => {
+                if param_idx < 3 {
+                    params[param_idx] = params[param_idx]
+                        .saturating_mul(10)
+                        .saturating_add((buf[0] - b'0') as u16);
+                }
+            }
+            b';' => {
+                param_idx += 1;
+                if param_idx >= 3 {
+                    // Too many params, consume until terminator
+                    loop {
+                        match io::stdin().read(&mut buf) {
+                            Ok(0) | Err(_) => return Key::Escape,
+                            Ok(_) if buf[0] == b'M' || buf[0] == b'm' => return Key::Escape,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            b'M' => {
+                // Press event — only handle left-click (btn == 0)
+                if params[0] == 0 && param_idx == 2 {
+                    return Key::MouseClick {
+                        row: params[2],
+                        col: params[1],
+                    };
+                }
+                return Key::Escape;
+            }
+            b'm' => {
+                // Release event — ignore
+                return Key::Escape;
+            }
+            _ => return Key::Escape,
+        }
     }
 }

@@ -18,9 +18,10 @@ pub fn run(
     current_account_idx: usize,
     page_size: u32,
     editor: Option<String>,
+    mouse: bool,
 ) -> io::Result<()> {
     let (mut cmd_tx, mut resp_rx) = backend::spawn(client);
-    let mut term = Terminal::new()?;
+    let mut term = Terminal::new(mouse)?;
 
     let account_names: Vec<String> = accounts.iter().map(|a| a.name.clone()).collect();
     let mut current_idx = current_account_idx;

@@ -19,6 +19,7 @@ pub struct Config {
 pub struct UiConfig {
     pub editor: Option<String>,
     pub page_size: u32,
+    pub mouse: bool,
 }
 
 #[derive(Debug)]
@@ -45,6 +46,7 @@ impl Config {
     fn parse(contents: &str) -> Result<Self, ConfigError> {
         let mut editor = None;
         let mut page_size = 500u32;
+        let mut mouse = true;
 
         // Legacy [jmap] fields
         let mut jmap_well_known_url = None;
@@ -90,6 +92,7 @@ impl Config {
                     match key {
                         "editor" => editor = Some(value.to_string()),
                         "page_size" => page_size = value.parse().unwrap_or(500),
+                        "mouse" => mouse = value != "false",
                         _ => {}
                     }
                 } else if current_section == "jmap" {
@@ -157,7 +160,7 @@ impl Config {
 
         Ok(Config {
             accounts: final_accounts,
-            ui: UiConfig { editor, page_size },
+            ui: UiConfig { editor, page_size, mouse },
         })
     }
 }
@@ -231,6 +234,42 @@ password_command = "pass show email"
 "#;
         let config = Config::parse(toml).unwrap();
         assert_eq!(config.ui.page_size, 500);
+    }
+
+    #[test]
+    fn test_mouse_config() {
+        let toml = r#"
+[jmap]
+well_known_url = "https://mx.example.com/.well-known/jmap"
+username = "user@example.com"
+password_command = "pass show email"
+"#;
+        let config = Config::parse(toml).unwrap();
+        assert!(config.ui.mouse); // default is true
+
+        let toml_disabled = r#"
+[ui]
+mouse = false
+
+[jmap]
+well_known_url = "https://mx.example.com/.well-known/jmap"
+username = "user@example.com"
+password_command = "pass show email"
+"#;
+        let config = Config::parse(toml_disabled).unwrap();
+        assert!(!config.ui.mouse);
+
+        let toml_enabled = r#"
+[ui]
+mouse = true
+
+[jmap]
+well_known_url = "https://mx.example.com/.well-known/jmap"
+username = "user@example.com"
+password_command = "pass show email"
+"#;
+        let config = Config::parse(toml_enabled).unwrap();
+        assert!(config.ui.mouse);
     }
 
     #[test]
