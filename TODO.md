@@ -43,7 +43,7 @@
 - [x] P0: Add explicit write-failure UX for optimistic actions (flag/read/move)
 - [x] P1: Add true pagination/load-more for mailbox email lists
 - [x] P1: Add periodic background sync (configurable interval)
-- [ ] P2: Add attachment list + open/download flow using JMAP `downloadUrl`
+- [x] P2: Add attachment list + open/download flow using JMAP `downloadUrl`
 - [ ] P2: Add conversation/thread grouping
 - [ ] P2: Improve config parser robustness (quoted strings, escapes, strict errors)
 - [ ] P2: Add integration tests for config parsing and JMAP response edge cases

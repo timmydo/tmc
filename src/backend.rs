@@ -36,6 +36,11 @@ pub enum BackendCommand {
         id: String,
         to_mailbox_id: String,
     },
+    DownloadAttachment {
+        blob_id: String,
+        name: String,
+        content_type: String,
+    },
     Shutdown,
 }
 
@@ -62,6 +67,10 @@ pub enum BackendResponse {
         id: String,
         action: EmailMutationAction,
         result: Result<(), String>,
+    },
+    AttachmentDownloaded {
+        name: String,
+        result: Result<std::path::PathBuf, String>,
     },
 }
 
@@ -210,6 +219,37 @@ fn backend_loop(
                     op_id,
                     id,
                     action: EmailMutationAction::Move,
+                    result,
+                });
+            }
+            BackendCommand::DownloadAttachment {
+                blob_id,
+                name,
+                content_type,
+            } => {
+                let result = (|| {
+                    let bytes = client
+                        .download_blob(&blob_id, &name, &content_type)
+                        .map_err(|e| e.to_string())?;
+
+                    let dir = std::env::temp_dir().join("tmc-attachments");
+                    std::fs::create_dir_all(&dir)
+                        .map_err(|e| format!("Failed to create temp dir: {}", e))?;
+
+                    let path = dir.join(&name);
+                    std::fs::write(&path, &bytes)
+                        .map_err(|e| format!("Failed to write file: {}", e))?;
+
+                    log_info!(
+                        "[Backend] Attachment saved: {} ({} bytes)",
+                        path.display(),
+                        bytes.len()
+                    );
+                    Ok(path)
+                })();
+
+                let _ = resp_tx.send(BackendResponse::AttachmentDownloaded {
+                    name,
                     result,
                 });
             }

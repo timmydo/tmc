@@ -61,6 +61,7 @@ impl HelpView {
             "  End         Jump to bottom".to_string(),
             "  r           Reply".to_string(),
             "  R           Reply all".to_string(),
+            "  a           Download/open attachment".to_string(),
             "  f           Toggle flagged".to_string(),
             "  u           Toggle read/unread".to_string(),
             String::new(),

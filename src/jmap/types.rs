@@ -153,6 +153,8 @@ pub struct Email {
     pub message_id: Option<Vec<String>>,
     #[serde(default)]
     pub references: Option<Vec<String>>,
+    #[serde(default)]
+    pub attachments: Option<Vec<BodyPart>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -179,7 +181,13 @@ impl std::fmt::Display for EmailAddress {
 pub struct BodyPart {
     pub part_id: String,
     #[serde(default)]
+    pub blob_id: Option<String>,
+    #[serde(default)]
     pub r#type: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub size: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

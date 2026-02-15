@@ -1,5 +1,6 @@
 use base64::Engine;
 use serde_json::json;
+use std::io::Read as _;
 
 use super::types::*;
 
@@ -343,7 +344,7 @@ impl JmapClient {
                     "properties": [
                         "id", "from", "to", "cc", "subject",
                         "receivedAt", "preview", "textBody", "bodyValues", "keywords",
-                        "mailboxIds"
+                        "mailboxIds", "attachments"
                     ],
                     "fetchTextBodyValues": true
                 }),
@@ -575,6 +576,81 @@ impl JmapClient {
         Err(JmapError::Api(
             "Unexpected response for Email/set".to_string(),
         ))
+    }
+
+    pub fn download_blob(
+        &self,
+        blob_id: &str,
+        name: &str,
+        content_type: &str,
+    ) -> Result<Vec<u8>, JmapError> {
+        let download_url = match &self.download_url {
+            Some(url) => url,
+            None => {
+                return Err(JmapError::Api("No download URL available".to_string()));
+            }
+        };
+
+        let url = download_url
+            .replace("{accountId}", &self.account_id)
+            .replace("{blobId}", blob_id)
+            .replace("{name}", name)
+            .replace("{type}", content_type);
+
+        log_debug!("[JMAP] Downloading blob from: {}", url);
+
+        let auth = Self::auth_header(&self.username, &self.password);
+        let agent = ureq::AgentBuilder::new().redirects(0).build();
+
+        let mut current_url = url;
+        for _ in 0..5 {
+            let response = agent
+                .get(&current_url)
+                .set("Authorization", &auth)
+                .call();
+
+            match response {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if (300..400).contains(&status) {
+                        if let Some(location) = resp.header("location") {
+                            current_url = Self::resolve_redirect(&current_url, location);
+                            continue;
+                        }
+                        return Err(JmapError::Http(format!(
+                            "Redirect {} without Location header",
+                            status
+                        )));
+                    }
+
+                    let mut bytes = Vec::new();
+                    resp.into_reader()
+                        .read_to_end(&mut bytes)
+                        .map_err(|e| JmapError::Parse(format!("Failed to read blob: {}", e)))?;
+
+                    log_info!("[JMAP] Blob downloaded, {} bytes", bytes.len());
+                    return Ok(bytes);
+                }
+                Err(ureq::Error::Status(code, resp)) if (300..400).contains(&code) => {
+                    if let Some(location) = resp.header("location") {
+                        current_url = Self::resolve_redirect(&current_url, location);
+                    } else {
+                        return Err(JmapError::Http(format!(
+                            "Redirect {} without Location header",
+                            code
+                        )));
+                    }
+                }
+                Err(ureq::Error::Status(code, _)) => {
+                    return Err(JmapError::Http(format!("HTTP {} error", code)));
+                }
+                Err(e) => {
+                    return Err(JmapError::Http(e.to_string()));
+                }
+            }
+        }
+
+        Err(JmapError::Http("Too many redirects".to_string()))
     }
 
     pub fn get_email_raw(&self, id: &str) -> Result<Option<String>, JmapError> {

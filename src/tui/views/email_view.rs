@@ -1,4 +1,4 @@
-use crate::backend::{BackendResponse, EmailMutationAction};
+use crate::backend::{BackendCommand, BackendResponse, EmailMutationAction};
 use crate::compose;
 use crate::jmap::types::Email;
 use crate::tui::input::Key;
@@ -9,7 +9,15 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::mpsc;
 
-use crate::backend::BackendCommand;
+fn format_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
 
 enum PendingWriteOp {
     Flag { old_flagged: bool },
@@ -30,6 +38,7 @@ pub struct EmailView {
     status_message: Option<String>,
     next_write_op_id: u64,
     pending_write_ops: HashMap<u64, PendingWriteOp>,
+    attachment_picking: bool,
 }
 
 impl EmailView {
@@ -52,6 +61,7 @@ impl EmailView {
             status_message: None,
             next_write_op_id: 1,
             pending_write_ops: HashMap::new(),
+            attachment_picking: false,
         }
     }
 
@@ -80,6 +90,30 @@ impl EmailView {
             "Subject: {}",
             email.subject.as_deref().unwrap_or("(no subject)")
         ));
+
+        // Attachments
+        if let Some(ref attachments) = email.attachments {
+            if !attachments.is_empty() {
+                lines.push(String::new());
+                lines.push(format!("Attachments ({})", attachments.len()));
+                for (i, att) in attachments.iter().enumerate() {
+                    let name = att.name.as_deref().unwrap_or("unnamed");
+                    let size = att
+                        .size
+                        .map(format_size)
+                        .unwrap_or_default();
+                    let type_str = att.r#type.as_deref().unwrap_or("application/octet-stream");
+                    lines.push(format!(
+                        "  [{}] {} ({}, {})",
+                        i + 1,
+                        name,
+                        type_str,
+                        size
+                    ));
+                }
+                lines.push("  Press 'a' then 1-9 to download/open".to_string());
+            }
+        }
 
         // Separator
         lines.push(String::new());
@@ -137,6 +171,43 @@ impl EmailView {
                 email.keywords.remove("$seen");
             }
         }
+    }
+
+    fn download_attachment(&mut self, index: usize) {
+        let attachment = self
+            .email
+            .as_ref()
+            .and_then(|e| e.attachments.as_ref())
+            .and_then(|a| a.get(index));
+
+        if let Some(att) = attachment {
+            if let Some(ref blob_id) = att.blob_id {
+                let name = att.name.as_deref().unwrap_or("attachment").to_string();
+                let content_type = att
+                    .r#type
+                    .as_deref()
+                    .unwrap_or("application/octet-stream")
+                    .to_string();
+                self.status_message = Some(format!("Downloading {}...", name));
+                let _ = self.cmd_tx.send(BackendCommand::DownloadAttachment {
+                    blob_id: blob_id.clone(),
+                    name,
+                    content_type,
+                });
+            } else {
+                self.status_message = Some("Attachment has no blob ID".to_string());
+            }
+        } else {
+            self.status_message = Some("Invalid attachment number".to_string());
+        }
+    }
+
+    fn attachment_count(&self) -> usize {
+        self.email
+            .as_ref()
+            .and_then(|e| e.attachments.as_ref())
+            .map(|a| a.len())
+            .unwrap_or(0)
     }
 
     fn rollback_pending_write(&mut self, op: PendingWriteOp) {
@@ -213,17 +284,30 @@ impl View for EmailView {
         term.move_to(term.rows, 1)?;
         term.set_reverse()?;
         let total_lines = self.lines.len();
-        let base_status = if self.pending_reply_all.is_some() {
+        let base_status = if self.attachment_picking {
+            format!(
+                " line {}/{} | Pick attachment [1-{}] or any key to cancel",
+                self.scroll + 1,
+                total_lines,
+                self.attachment_count()
+            )
+        } else if self.pending_reply_all.is_some() {
             format!(
                 " line {}/{} | Loading reply data... | q:back",
                 self.scroll + 1,
                 total_lines
             )
         } else {
+            let att_hint = if self.attachment_count() > 0 {
+                " a:attach"
+            } else {
+                ""
+            };
             format!(
-                " line {}/{} | q:back n/j:down p/k:up r:reply R:reply-all c:compose ?:help",
+                " line {}/{} | q:back n/j:down p/k:up r:reply R:reply-all{} ?:help",
                 self.scroll + 1,
-                total_lines
+                total_lines,
+                att_hint
             )
         };
         let status = if let Some(ref msg) = self.status_message {
@@ -242,6 +326,18 @@ impl View for EmailView {
     }
 
     fn handle_key(&mut self, key: Key, term_rows: u16) -> ViewAction {
+        // Attachment picking mode: waiting for digit
+        if self.attachment_picking {
+            self.attachment_picking = false;
+            if let Key::Char(c @ '1'..='9') = key {
+                let index = (c as usize) - ('1' as usize);
+                self.download_attachment(index);
+            } else {
+                self.status_message = Some("Cancelled".to_string());
+            }
+            return ViewAction::Continue;
+        }
+
         let page = (term_rows as usize).saturating_sub(1);
         match key {
             Key::Char('q') => ViewAction::Pop,
@@ -328,6 +424,19 @@ impl View for EmailView {
                 }
                 ViewAction::Continue
             }
+            Key::Char('a') => {
+                let count = self.attachment_count();
+                if count == 0 {
+                    self.status_message = Some("No attachments".to_string());
+                } else if count == 1 {
+                    self.download_attachment(0);
+                } else {
+                    self.attachment_picking = true;
+                    self.status_message =
+                        Some(format!("Download attachment [1-{}]:", count));
+                }
+                ViewAction::Continue
+            }
             Key::Char('c') => {
                 let draft = compose::build_compose_draft(&self.from_address);
                 ViewAction::Compose(draft)
@@ -404,6 +513,43 @@ impl View for EmailView {
                 } else {
                     false
                 }
+            }
+            BackendResponse::AttachmentDownloaded { name, result } => {
+                match result {
+                    Ok(path) => {
+                        self.status_message =
+                            Some(format!("Saved: {}", path.display()));
+                        // Try to open with xdg-open / open
+                        let opener = std::env::var("OPENER")
+                            .unwrap_or_else(|_| {
+                                if cfg!(target_os = "macos") {
+                                    "open".to_string()
+                                } else {
+                                    "xdg-open".to_string()
+                                }
+                            });
+                        match std::process::Command::new(&opener)
+                            .arg(path)
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .spawn()
+                        {
+                            Ok(_) => {}
+                            Err(e) => {
+                                self.status_message = Some(format!(
+                                    "Saved {} (could not open: {})",
+                                    name, e
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        self.status_message =
+                            Some(format!("Download failed: {}", e));
+                    }
+                }
+                true
             }
             _ => false,
         }

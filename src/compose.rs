@@ -202,6 +202,7 @@ mod tests {
             mailbox_ids: HashMap::new(),
             message_id: Some(vec!["abc@example.com".to_string()]),
             references: None,
+            attachments: None,
         };
 
         let draft = build_reply_draft(&email, false, "me@example.com");
