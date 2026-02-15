@@ -4,6 +4,7 @@ pub mod views;
 
 use crate::backend::{self, BackendCommand};
 use crate::compose;
+use crate::config::AccountConfig;
 use crate::jmap::client::JmapClient;
 use input::read_key;
 use screen::Terminal;
@@ -13,41 +14,45 @@ use views::{ViewAction, ViewStack};
 
 pub fn run(
     client: JmapClient,
+    accounts: Vec<AccountConfig>,
+    current_account_idx: usize,
     page_size: u32,
     editor: Option<String>,
-    username: String,
 ) -> io::Result<()> {
-    let (cmd_tx, resp_rx) = backend::spawn(client);
+    let (mut cmd_tx, mut resp_rx) = backend::spawn(client);
     let mut term = Terminal::new()?;
 
-    let mailbox_view = MailboxListView::new(cmd_tx.clone(), username.clone(), page_size);
-    // Request initial mailbox fetch
+    let account_names: Vec<String> = accounts.iter().map(|a| a.name.clone()).collect();
+    let mut current_idx = current_account_idx;
+
+    let mailbox_view = MailboxListView::new(
+        cmd_tx.clone(),
+        accounts[current_idx].username.clone(),
+        page_size,
+        account_names.clone(),
+        accounts[current_idx].name.clone(),
+    );
     let _ = cmd_tx.send(BackendCommand::FetchMailboxes);
 
     let mut stack = ViewStack::new(Box::new(mailbox_view));
 
-    // Determine editor command
     let editor_cmd = editor
         .or_else(|| std::env::var("EDITOR").ok())
         .unwrap_or_else(|| "vi".to_string());
 
-    // Initial render
     stack.render_current(&mut term)?;
 
     loop {
-        // Check for terminal resize
         if term.check_resize() {
             stack.render_current(&mut term)?;
         }
 
-        // Poll backend responses (non-blocking)
         let mut needs_render = false;
         while let Ok(response) = resp_rx.try_recv() {
             if stack.handle_response(&response) {
                 needs_render = true;
             }
 
-            // Check for pending actions from views (e.g., reply compose)
             if let Some(view) = stack.current_mut() {
                 if let Some(ViewAction::Compose(draft_text)) = view.take_pending_action() {
                     spawn_editor(&draft_text, &editor_cmd);
@@ -59,7 +64,6 @@ pub fn run(
             stack.render_current(&mut term)?;
         }
 
-        // Read input
         if let Some(key) = read_key() {
             let action = match stack.handle_key(key, term.rows) {
                 Some(action) => action,
@@ -87,11 +91,43 @@ pub fn run(
                     spawn_editor(&draft_text, &editor_cmd);
                     stack.render_current(&mut term)?;
                 }
+                ViewAction::SwitchAccount(name) => {
+                    if let Some(idx) = accounts.iter().position(|a| a.name == name) {
+                        current_idx = idx;
+                        let account = &accounts[current_idx];
+
+                        // Shut down old backend
+                        let _ = cmd_tx.send(BackendCommand::Shutdown);
+
+                        // Connect to new account
+                        match crate::connect_account(account) {
+                            Ok(new_client) => {
+                                let (new_cmd_tx, new_resp_rx) = backend::spawn(new_client);
+                                cmd_tx = new_cmd_tx;
+                                resp_rx = new_resp_rx;
+
+                                let mailbox_view = MailboxListView::new(
+                                    cmd_tx.clone(),
+                                    account.username.clone(),
+                                    page_size,
+                                    account_names.clone(),
+                                    account.name.clone(),
+                                );
+                                let _ = cmd_tx.send(BackendCommand::FetchMailboxes);
+                                stack = ViewStack::new(Box::new(mailbox_view));
+                            }
+                            Err(e) => {
+                                crate::log_error!("Failed to connect to account {}: {}", name, e);
+                                // Stay on current account, just re-render
+                            }
+                        }
+                        stack.render_current(&mut term)?;
+                    }
+                }
             }
         }
     }
 
-    // Signal backend to shut down
     let _ = cmd_tx.send(BackendCommand::Shutdown);
 
     Ok(())

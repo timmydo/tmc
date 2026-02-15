@@ -17,6 +17,8 @@ pub struct MailboxListView {
     cursor: usize,
     loading: bool,
     error: Option<String>,
+    account_names: Vec<String>,
+    current_account: String,
 }
 
 impl MailboxListView {
@@ -24,6 +26,8 @@ impl MailboxListView {
         cmd_tx: mpsc::Sender<BackendCommand>,
         from_address: String,
         page_size: u32,
+        account_names: Vec<String>,
+        current_account: String,
     ) -> Self {
         MailboxListView {
             cmd_tx,
@@ -33,12 +37,27 @@ impl MailboxListView {
             cursor: 0,
             loading: true,
             error: None,
+            account_names,
+            current_account,
         }
     }
 
     fn request_refresh(&mut self) {
         self.loading = true;
         let _ = self.cmd_tx.send(BackendCommand::FetchMailboxes);
+    }
+
+    fn next_account_name(&self) -> Option<String> {
+        if self.account_names.len() <= 1 {
+            return None;
+        }
+        let current_idx = self
+            .account_names
+            .iter()
+            .position(|n| n == &self.current_account)
+            .unwrap_or(0);
+        let next_idx = (current_idx + 1) % self.account_names.len();
+        Some(self.account_names[next_idx].clone())
     }
 
     fn sort_mailboxes(mailboxes: &mut [Mailbox]) {
@@ -83,7 +102,12 @@ impl View for MailboxListView {
         // Header
         term.move_to(1, 1)?;
         term.set_bold()?;
-        term.write_truncated("tmc - Timmy's Mail Console", term.cols)?;
+        let header = if self.account_names.len() > 1 {
+            format!("tmc - {}", self.current_account)
+        } else {
+            "tmc - Timmy's Mail Console".to_string()
+        };
+        term.write_truncated(&header, term.cols)?;
         term.reset_attr()?;
 
         // Separator
@@ -138,15 +162,21 @@ impl View for MailboxListView {
         // Status bar
         term.move_to(term.rows, 1)?;
         term.set_reverse()?;
+        let account_hint = if self.account_names.len() > 1 {
+            " a:account"
+        } else {
+            ""
+        };
         let status = if self.loading {
-            " Loading... | q:quit".to_string()
+            format!(" Loading... | q:quit{}", account_hint)
         } else if self.mailboxes.is_empty() {
-            " q:quit g:refresh".to_string()
+            format!(" q:quit g:refresh{}", account_hint)
         } else {
             format!(
-                " {}/{} | q:quit n/p:navigate RET:open g:refresh c:compose ?:help",
+                " {}/{} | q:quit n/p:navigate RET:open g:refresh c:compose ?:help{}",
                 self.cursor + 1,
-                self.mailboxes.len()
+                self.mailboxes.len(),
+                account_hint,
             )
         };
         term.write_truncated(&status, term.cols)?;
@@ -221,6 +251,13 @@ impl View for MailboxListView {
             Key::Char('c') => {
                 let draft = compose::build_compose_draft(&self.from_address);
                 ViewAction::Compose(draft)
+            }
+            Key::Char('a') => {
+                if let Some(next) = self.next_account_name() {
+                    ViewAction::SwitchAccount(next)
+                } else {
+                    ViewAction::Continue
+                }
             }
             Key::Char('?') => ViewAction::Push(Box::new(HelpView::new())),
             _ => ViewAction::Continue,

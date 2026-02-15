@@ -7,7 +7,7 @@ mod config;
 mod jmap;
 mod tui;
 
-use config::Config;
+use config::{AccountConfig, Config};
 use jmap::client::JmapClient;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -23,7 +23,7 @@ fn default_config_path() -> PathBuf {
     }
 }
 
-fn run_password_command(cmd: &str) -> Result<String, String> {
+pub fn run_password_command(cmd: &str) -> Result<String, String> {
     let output = Command::new("sh")
         .arg("-c")
         .arg(cmd)
@@ -42,6 +42,14 @@ fn run_password_command(cmd: &str) -> Result<String, String> {
         .map_err(|e| format!("password command output is not valid UTF-8: {}", e))?;
 
     Ok(password.trim_end_matches('\n').to_string())
+}
+
+pub fn connect_account(account: &AccountConfig) -> Result<JmapClient, String> {
+    let password = run_password_command(&account.password_command)?;
+    let (_session, client) =
+        JmapClient::discover(&account.well_known_url, &account.username, &password)
+            .map_err(|e| format!("JMAP discovery error: {}", e))?;
+    Ok(client)
 }
 
 fn show_log() {
@@ -90,7 +98,7 @@ fn main() {
             eprintln!("Error loading config from {}: {}", config_path.display(), e);
             eprintln!("Create a config file with:");
             eprintln!();
-            eprintln!("  [jmap]");
+            eprintln!("  [account.personal]");
             eprintln!("  well_known_url = \"https://your-server/.well-known/jmap\"");
             eprintln!("  username = \"you@example.com\"");
             eprintln!("  password_command = \"pass show email/example.com\"");
@@ -98,38 +106,31 @@ fn main() {
         }
     };
 
-    // Get password by running the configured command
-    let password = match run_password_command(&config.jmap.password_command) {
-        Ok(p) => p,
+    let first_account = &config.accounts[0];
+
+    // Connect to the first account
+    eprint!("Connecting to {} ({})...", first_account.name, first_account.well_known_url);
+    io::stderr().flush().ok();
+
+    let client = match connect_account(first_account) {
+        Ok(client) => {
+            eprintln!(" OK");
+            client
+        }
         Err(e) => {
-            eprintln!("Error: {}", e);
+            eprintln!(" FAILED");
+            eprintln!("{}", e);
             std::process::exit(1);
         }
     };
 
-    // JMAP session discovery
-    eprint!("Connecting to {}...", config.jmap.well_known_url);
-    io::stderr().flush().ok();
-
-    let (_session, client) =
-        match JmapClient::discover(&config.jmap.well_known_url, &config.jmap.username, &password) {
-            Ok(result) => {
-                eprintln!(" OK");
-                result
-            }
-            Err(e) => {
-                eprintln!(" FAILED");
-                eprintln!("JMAP discovery error: {}", e);
-                std::process::exit(1);
-            }
-        };
-
     // Enter TUI
     if let Err(e) = tui::run(
         client,
+        config.accounts,
+        0,
         config.ui.page_size,
         config.ui.editor,
-        config.jmap.username,
     ) {
         eprintln!("TUI error: {}", e);
         std::process::exit(1);

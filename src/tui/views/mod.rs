@@ -14,6 +14,7 @@ pub enum ViewAction {
     Pop,
     Quit,
     Compose(String),
+    SwitchAccount(String),
 }
 
 pub trait View {
