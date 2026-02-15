@@ -1,0 +1,481 @@
+use crate::backend::{BackendCommand, BackendResponse, EmailMutationAction};
+use crate::compose;
+use crate::jmap::types::Email;
+use crate::tui::input::Key;
+use crate::tui::screen::Terminal;
+use crate::tui::views::email_view::EmailView;
+use crate::tui::views::help::HelpView;
+use crate::tui::views::{View, ViewAction};
+use std::collections::HashMap;
+use std::io;
+use std::sync::mpsc;
+
+enum PendingWriteOp {
+    Flag { email_id: String, old_flagged: bool },
+    Seen { email_id: String, old_seen: bool },
+}
+
+pub struct ThreadView {
+    cmd_tx: mpsc::Sender<BackendCommand>,
+    from_address: String,
+    thread_id: String,
+    subject: String,
+    emails: Vec<Email>,
+    cursor: usize,
+    loading: bool,
+    error: Option<String>,
+    pending_click: bool,
+    status_message: Option<String>,
+    next_write_op_id: u64,
+    pending_write_ops: HashMap<u64, PendingWriteOp>,
+}
+
+impl ThreadView {
+    pub fn new(
+        cmd_tx: mpsc::Sender<BackendCommand>,
+        from_address: String,
+        thread_id: String,
+        subject: String,
+    ) -> Self {
+        let _ = cmd_tx.send(BackendCommand::QueryThreadEmails {
+            thread_id: thread_id.clone(),
+        });
+        ThreadView {
+            cmd_tx,
+            from_address,
+            thread_id,
+            subject,
+            emails: Vec::new(),
+            cursor: 0,
+            loading: true,
+            error: None,
+            pending_click: false,
+            status_message: None,
+            next_write_op_id: 1,
+            pending_write_ops: HashMap::new(),
+        }
+    }
+
+    fn is_unread(email: &Email) -> bool {
+        !email.keywords.contains_key("$seen")
+    }
+
+    fn is_flagged(email: &Email) -> bool {
+        email.keywords.contains_key("$flagged")
+    }
+
+    fn format_email(email: &Email, width: u16) -> String {
+        let unread = if Self::is_unread(email) { "N" } else { " " };
+        let flagged = if Self::is_flagged(email) { "F" } else { " " };
+
+        let from = email
+            .from
+            .as_ref()
+            .and_then(|addrs| addrs.first())
+            .map(|a| {
+                a.name
+                    .as_deref()
+                    .unwrap_or_else(|| a.email.as_deref().unwrap_or("(unknown)"))
+            })
+            .unwrap_or("(unknown)");
+
+        let subject = email.subject.as_deref().unwrap_or("(no subject)");
+
+        let date = email
+            .received_at
+            .as_deref()
+            .map(|d| if d.len() >= 10 { &d[..10] } else { d })
+            .unwrap_or("");
+
+        let w = width as usize;
+        let from_width = 20.min(w.saturating_sub(19));
+        let subj_width = w.saturating_sub(19 + from_width);
+
+        let from_display = truncate(from, from_width);
+        let subj_display = truncate(subject, subj_width);
+
+        format!(
+            " {}{} {} {:from_w$} {}",
+            unread,
+            flagged,
+            date,
+            from_display,
+            subj_display,
+            from_w = from_width
+        )
+    }
+
+    fn next_op_id(&mut self) -> u64 {
+        let id = self.next_write_op_id;
+        self.next_write_op_id = self.next_write_op_id.wrapping_add(1);
+        id
+    }
+
+    fn set_email_flag_state(&mut self, email_id: &str, flagged: bool) {
+        if let Some(email) = self.emails.iter_mut().find(|e| e.id == email_id) {
+            if flagged {
+                email.keywords.insert("$flagged".to_string(), true);
+            } else {
+                email.keywords.remove("$flagged");
+            }
+        }
+    }
+
+    fn set_email_seen_state(&mut self, email_id: &str, seen: bool) {
+        if let Some(email) = self.emails.iter_mut().find(|e| e.id == email_id) {
+            if seen {
+                email.keywords.insert("$seen".to_string(), true);
+            } else {
+                email.keywords.remove("$seen");
+            }
+        }
+    }
+
+    fn rollback_pending_write(&mut self, op: PendingWriteOp) {
+        match op {
+            PendingWriteOp::Flag {
+                email_id,
+                old_flagged,
+            } => self.set_email_flag_state(&email_id, old_flagged),
+            PendingWriteOp::Seen { email_id, old_seen } => {
+                self.set_email_seen_state(&email_id, old_seen)
+            }
+        }
+    }
+
+    fn open_selected(&mut self) -> Option<ViewAction> {
+        let email = self.emails.get(self.cursor)?;
+        let email_id = email.id.clone();
+        let was_seen = email.keywords.contains_key("$seen");
+        let view = EmailView::new(
+            self.cmd_tx.clone(),
+            self.from_address.clone(),
+            email_id.clone(),
+        );
+        let _ = self.cmd_tx.send(BackendCommand::GetEmail {
+            id: email_id.clone(),
+        });
+        if !was_seen {
+            let op_id = self.next_op_id();
+            self.pending_write_ops.insert(
+                op_id,
+                PendingWriteOp::Seen {
+                    email_id: email_id.clone(),
+                    old_seen: false,
+                },
+            );
+            self.set_email_seen_state(&email_id, true);
+            if let Err(e) = self.cmd_tx.send(BackendCommand::MarkEmailRead {
+                op_id,
+                id: email_id.clone(),
+            }) {
+                self.pending_write_ops.remove(&op_id);
+                self.set_email_seen_state(&email_id, false);
+                self.status_message = Some(format!("Mark read failed: {}", e));
+            }
+        }
+        Some(ViewAction::Push(Box::new(view)))
+    }
+
+    fn request_refresh(&mut self) {
+        self.loading = true;
+        let _ = self.cmd_tx.send(BackendCommand::QueryThreadEmails {
+            thread_id: self.thread_id.clone(),
+        });
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else if max <= 3 {
+        s.chars().take(max).collect()
+    } else {
+        let mut end = max - 3;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
+    }
+}
+
+impl View for ThreadView {
+    fn render(&self, term: &mut Terminal) -> io::Result<()> {
+        term.clear()?;
+
+        // Header
+        term.move_to(1, 1)?;
+        term.set_bold()?;
+        let header = format!("Thread: {} ({} messages)", self.subject, self.emails.len());
+        term.write_truncated(&header, term.cols)?;
+        term.reset_attr()?;
+
+        // Separator
+        term.move_to(2, 1)?;
+        let sep = "-".repeat(term.cols as usize);
+        term.write_str(&sep)?;
+
+        if self.loading && self.emails.is_empty() {
+            term.move_to(3, 1)?;
+            term.write_truncated("Loading thread...", term.cols)?;
+        } else if let Some(ref err) = self.error {
+            term.move_to(3, 1)?;
+            term.write_truncated(err, term.cols)?;
+        } else if self.emails.is_empty() {
+            term.move_to(3, 1)?;
+            term.write_truncated("No messages in thread.", term.cols)?;
+        } else {
+            let max_items = (term.rows as usize).saturating_sub(4);
+            let scroll_offset = if self.cursor >= max_items {
+                self.cursor - max_items + 1
+            } else {
+                0
+            };
+
+            for (i, email) in self
+                .emails
+                .iter()
+                .skip(scroll_offset)
+                .enumerate()
+                .take(max_items)
+            {
+                let row = 3 + i as u16;
+                term.move_to(row, 1)?;
+
+                let display_idx = scroll_offset + i;
+                let line = Self::format_email(email, term.cols);
+
+                if display_idx == self.cursor {
+                    term.set_reverse()?;
+                    if Self::is_unread(email) {
+                        term.set_bold()?;
+                    }
+                } else if Self::is_unread(email) {
+                    term.set_bold()?;
+                }
+
+                term.write_truncated(&line, term.cols)?;
+                term.reset_attr()?;
+            }
+        }
+
+        // Status bar
+        term.move_to(term.rows, 1)?;
+        term.set_reverse()?;
+        let base_status = if self.loading {
+            " Loading... | q:back".to_string()
+        } else if self.emails.is_empty() {
+            " q:back g:refresh".to_string()
+        } else {
+            format!(
+                " {}/{} | q:back n/p:nav RET:read g:refresh f:flag u:unread",
+                self.cursor + 1,
+                self.emails.len()
+            )
+        };
+        let status = if let Some(ref msg) = self.status_message {
+            format!("{} | {}", msg, base_status)
+        } else {
+            base_status
+        };
+        term.write_truncated(&status, term.cols)?;
+        let remaining = (term.cols as usize).saturating_sub(status.len());
+        for _ in 0..remaining {
+            term.write_str(" ")?;
+        }
+        term.reset_attr()?;
+
+        term.flush()
+    }
+
+    fn handle_key(&mut self, key: Key, term_rows: u16) -> ViewAction {
+        let page = (term_rows as usize).saturating_sub(4);
+        match key {
+            Key::Char('q') => ViewAction::Pop,
+            Key::Char('n') | Key::Char('j') | Key::Down => {
+                if !self.emails.is_empty() && self.cursor + 1 < self.emails.len() {
+                    self.cursor += 1;
+                }
+                ViewAction::Continue
+            }
+            Key::Char('p') | Key::Char('k') | Key::Up => {
+                if self.cursor > 0 {
+                    self.cursor -= 1;
+                }
+                ViewAction::Continue
+            }
+            Key::PageDown => {
+                if !self.emails.is_empty() {
+                    self.cursor = (self.cursor + page).min(self.emails.len() - 1);
+                }
+                ViewAction::Continue
+            }
+            Key::PageUp => {
+                self.cursor = self.cursor.saturating_sub(page);
+                ViewAction::Continue
+            }
+            Key::Home => {
+                self.cursor = 0;
+                ViewAction::Continue
+            }
+            Key::End => {
+                if !self.emails.is_empty() {
+                    self.cursor = self.emails.len() - 1;
+                }
+                ViewAction::Continue
+            }
+            Key::Enter => self.open_selected().unwrap_or(ViewAction::Continue),
+            Key::Char('g') => {
+                self.request_refresh();
+                ViewAction::Continue
+            }
+            Key::Char('f') => {
+                if let Some(email) = self.emails.get(self.cursor) {
+                    let email_id = email.id.clone();
+                    let old_flagged = email.keywords.contains_key("$flagged");
+                    let new_flagged = !old_flagged;
+                    let op_id = self.next_op_id();
+                    self.pending_write_ops.insert(
+                        op_id,
+                        PendingWriteOp::Flag {
+                            email_id: email_id.clone(),
+                            old_flagged,
+                        },
+                    );
+                    self.set_email_flag_state(&email_id, new_flagged);
+                    if let Err(e) = self.cmd_tx.send(BackendCommand::SetEmailFlagged {
+                        op_id,
+                        id: email_id.clone(),
+                        flagged: new_flagged,
+                    }) {
+                        self.pending_write_ops.remove(&op_id);
+                        self.set_email_flag_state(&email_id, old_flagged);
+                        self.status_message = Some(format!("Flag update failed: {}", e));
+                    }
+                }
+                ViewAction::Continue
+            }
+            Key::Char('u') => {
+                if let Some(email) = self.emails.get(self.cursor) {
+                    let email_id = email.id.clone();
+                    let old_seen = email.keywords.contains_key("$seen");
+                    let new_seen = !old_seen;
+                    let op_id = self.next_op_id();
+                    self.pending_write_ops.insert(
+                        op_id,
+                        PendingWriteOp::Seen {
+                            email_id: email_id.clone(),
+                            old_seen,
+                        },
+                    );
+                    self.set_email_seen_state(&email_id, new_seen);
+                    let send_result = if new_seen {
+                        self.cmd_tx.send(BackendCommand::MarkEmailRead {
+                            op_id,
+                            id: email_id.clone(),
+                        })
+                    } else {
+                        self.cmd_tx.send(BackendCommand::MarkEmailUnread {
+                            op_id,
+                            id: email_id.clone(),
+                        })
+                    };
+                    if let Err(e) = send_result {
+                        self.pending_write_ops.remove(&op_id);
+                        self.set_email_seen_state(&email_id, old_seen);
+                        self.status_message = Some(format!("Read state update failed: {}", e));
+                    }
+                }
+                ViewAction::Continue
+            }
+            Key::Char('c') => {
+                let draft = compose::build_compose_draft(&self.from_address);
+                ViewAction::Compose(draft)
+            }
+            Key::Char('?') => ViewAction::Push(Box::new(HelpView::new())),
+            Key::ScrollUp => {
+                if self.cursor > 0 {
+                    self.cursor -= 1;
+                }
+                ViewAction::Continue
+            }
+            Key::ScrollDown => {
+                if !self.emails.is_empty() && self.cursor + 1 < self.emails.len() {
+                    self.cursor += 1;
+                }
+                ViewAction::Continue
+            }
+            Key::MouseClick { row, col: _ } => {
+                if row >= 3 && !self.emails.is_empty() {
+                    let max_items = (term_rows as usize).saturating_sub(4);
+                    let scroll_offset = if self.cursor >= max_items {
+                        self.cursor - max_items + 1
+                    } else {
+                        0
+                    };
+                    let clicked = scroll_offset + (row - 3) as usize;
+                    if clicked < self.emails.len() {
+                        self.cursor = clicked;
+                        self.pending_click = true;
+                        return ViewAction::Continue;
+                    }
+                }
+                ViewAction::Continue
+            }
+            _ => ViewAction::Continue,
+        }
+    }
+
+    fn take_pending_action(&mut self) -> Option<ViewAction> {
+        if self.pending_click {
+            self.pending_click = false;
+            return self.open_selected();
+        }
+        None
+    }
+
+    fn on_response(&mut self, response: &BackendResponse) -> bool {
+        match response {
+            BackendResponse::ThreadEmails { thread_id, emails } if *thread_id == self.thread_id => {
+                self.loading = false;
+                match emails {
+                    Ok(emails) => {
+                        self.emails = emails.clone();
+                        self.error = None;
+                        self.pending_write_ops.clear();
+                        if self.cursor >= self.emails.len() && !self.emails.is_empty() {
+                            self.cursor = self.emails.len() - 1;
+                        }
+                    }
+                    Err(e) => {
+                        self.error = Some(format!("Failed to load thread: {}", e));
+                    }
+                }
+                true
+            }
+            BackendResponse::EmailMutation {
+                op_id,
+                id: _,
+                action,
+                result,
+            } => {
+                if let Some(pending) = self.pending_write_ops.remove(op_id) {
+                    if let Err(e) = result {
+                        self.rollback_pending_write(pending);
+                        let action_label = match action {
+                            EmailMutationAction::MarkRead => "Mark read",
+                            EmailMutationAction::MarkUnread => "Mark unread",
+                            EmailMutationAction::SetFlagged(_) => "Flag update",
+                            EmailMutationAction::Move => "Move",
+                        };
+                        self.status_message = Some(format!("{} failed: {}", action_label, e));
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+}

@@ -1,5 +1,6 @@
 use crate::jmap::client::JmapClient;
 use crate::jmap::types::{Email, Mailbox};
+use std::collections::HashMap;
 use std::sync::mpsc;
 use std::thread;
 
@@ -36,6 +37,9 @@ pub enum BackendCommand {
         id: String,
         to_mailbox_id: String,
     },
+    QueryThreadEmails {
+        thread_id: String,
+    },
     DownloadAttachment {
         blob_id: String,
         name: String,
@@ -53,6 +57,11 @@ pub enum BackendResponse {
         total: Option<u32>,
         position: u32,
         loaded: u32,
+        thread_sizes: HashMap<String, usize>,
+    },
+    ThreadEmails {
+        thread_id: String,
+        emails: Result<Vec<Email>, String>,
     },
     EmailBody {
         id: String,
@@ -128,12 +137,27 @@ fn backend_loop(
                     } else {
                         client.get_emails(&query.ids).map_err(|e| e.to_string())
                     }?;
-                    Ok((emails, total, position, loaded))
+
+                    // Build thread sizes map
+                    let mut thread_sizes = HashMap::new();
+                    let thread_ids: Vec<String> =
+                        emails.iter().filter_map(|e| e.thread_id.clone()).collect();
+                    if !thread_ids.is_empty() {
+                        if let Ok(threads) = client.get_threads(&thread_ids) {
+                            for thread in threads {
+                                thread_sizes.insert(thread.id.clone(), thread.email_ids.len());
+                            }
+                        }
+                    }
+
+                    Ok((emails, total, position, loaded, thread_sizes))
                 })();
 
-                let (emails, total, position, loaded) = match result {
-                    Ok((emails, total, position, loaded)) => (Ok(emails), total, position, loaded),
-                    Err(e) => (Err(e), None, position, 0),
+                let (emails, total, position, loaded, thread_sizes) = match result {
+                    Ok((emails, total, position, loaded, thread_sizes)) => {
+                        (Ok(emails), total, position, loaded, thread_sizes)
+                    }
+                    Err(e) => (Err(e), None, position, 0, HashMap::new()),
                 };
 
                 let _ = resp_tx.send(BackendResponse::Emails {
@@ -142,6 +166,16 @@ fn backend_loop(
                     total,
                     position,
                     loaded,
+                    thread_sizes,
+                });
+            }
+            BackendCommand::QueryThreadEmails { thread_id } => {
+                let result = client
+                    .query_thread_emails(&thread_id)
+                    .map_err(|e| e.to_string());
+                let _ = resp_tx.send(BackendResponse::ThreadEmails {
+                    thread_id,
+                    emails: result,
                 });
             }
             BackendCommand::GetEmail { id } => {
@@ -248,10 +282,7 @@ fn backend_loop(
                     Ok(path)
                 })();
 
-                let _ = resp_tx.send(BackendResponse::AttachmentDownloaded {
-                    name,
-                    result,
-                });
+                let _ = resp_tx.send(BackendResponse::AttachmentDownloaded { name, result });
             }
             BackendCommand::Shutdown => {
                 break;

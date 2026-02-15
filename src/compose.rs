@@ -182,6 +182,7 @@ mod tests {
 
         let email = Email {
             id: "test-id".to_string(),
+            thread_id: None,
             from: Some(vec![EmailAddress {
                 name: Some("Sender".to_string()),
                 email: Some("sender@example.com".to_string()),

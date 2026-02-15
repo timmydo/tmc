@@ -98,18 +98,9 @@ impl EmailView {
                 lines.push(format!("Attachments ({})", attachments.len()));
                 for (i, att) in attachments.iter().enumerate() {
                     let name = att.name.as_deref().unwrap_or("unnamed");
-                    let size = att
-                        .size
-                        .map(format_size)
-                        .unwrap_or_default();
+                    let size = att.size.map(format_size).unwrap_or_default();
                     let type_str = att.r#type.as_deref().unwrap_or("application/octet-stream");
-                    lines.push(format!(
-                        "  [{}] {} ({}, {})",
-                        i + 1,
-                        name,
-                        type_str,
-                        size
-                    ));
+                    lines.push(format!("  [{}] {} ({}, {})", i + 1, name, type_str, size));
                 }
                 lines.push("  Press 'a' then 1-9 to download/open".to_string());
             }
@@ -432,8 +423,7 @@ impl View for EmailView {
                     self.download_attachment(0);
                 } else {
                     self.attachment_picking = true;
-                    self.status_message =
-                        Some(format!("Download attachment [1-{}]:", count));
+                    self.status_message = Some(format!("Download attachment [1-{}]:", count));
                 }
                 ViewAction::Continue
             }
@@ -517,17 +507,15 @@ impl View for EmailView {
             BackendResponse::AttachmentDownloaded { name, result } => {
                 match result {
                     Ok(path) => {
-                        self.status_message =
-                            Some(format!("Saved: {}", path.display()));
+                        self.status_message = Some(format!("Saved: {}", path.display()));
                         // Try to open with xdg-open / open
-                        let opener = std::env::var("OPENER")
-                            .unwrap_or_else(|_| {
-                                if cfg!(target_os = "macos") {
-                                    "open".to_string()
-                                } else {
-                                    "xdg-open".to_string()
-                                }
-                            });
+                        let opener = std::env::var("OPENER").unwrap_or_else(|_| {
+                            if cfg!(target_os = "macos") {
+                                "open".to_string()
+                            } else {
+                                "xdg-open".to_string()
+                            }
+                        });
                         match std::process::Command::new(&opener)
                             .arg(path)
                             .stdin(std::process::Stdio::null())
@@ -537,16 +525,13 @@ impl View for EmailView {
                         {
                             Ok(_) => {}
                             Err(e) => {
-                                self.status_message = Some(format!(
-                                    "Saved {} (could not open: {})",
-                                    name, e
-                                ));
+                                self.status_message =
+                                    Some(format!("Saved {} (could not open: {})", name, e));
                             }
                         }
                     }
                     Err(e) => {
-                        self.status_message =
-                            Some(format!("Download failed: {}", e));
+                        self.status_message = Some(format!("Download failed: {}", e));
                     }
                 }
                 true

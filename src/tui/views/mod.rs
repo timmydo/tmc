@@ -2,6 +2,7 @@ pub mod email_list;
 pub mod email_view;
 pub mod help;
 pub mod mailbox_list;
+pub mod thread_view;
 
 use super::input::Key;
 use super::screen::Terminal;

@@ -297,6 +297,7 @@ impl JmapClient {
                     "accountId": self.account_id,
                     "filter": filter,
                     "sort": [{ "property": "receivedAt", "isAscending": false }],
+                    "collapseThreads": true,
                     "limit": limit,
                     "position": position
                 }),
@@ -342,7 +343,7 @@ impl JmapClient {
                     "accountId": self.account_id,
                     "ids": ids,
                     "properties": [
-                        "id", "from", "to", "cc", "subject",
+                        "id", "threadId", "from", "to", "cc", "subject",
                         "receivedAt", "preview", "textBody", "bodyValues", "keywords",
                         "mailboxIds", "attachments"
                     ],
@@ -604,10 +605,7 @@ impl JmapClient {
 
         let mut current_url = url;
         for _ in 0..5 {
-            let response = agent
-                .get(&current_url)
-                .set("Authorization", &auth)
-                .call();
+            let response = agent.get(&current_url).set("Authorization", &auth).call();
 
             match response {
                 Ok(resp) => {
@@ -651,6 +649,82 @@ impl JmapClient {
         }
 
         Err(JmapError::Http("Too many redirects".to_string()))
+    }
+
+    pub fn get_threads(&self, ids: &[String]) -> Result<Vec<super::types::Thread>, JmapError> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        log_info!("[JMAP] Thread/get for {} thread IDs", ids.len());
+
+        let request = JmapRequest {
+            using: vec!["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            method_calls: vec![MethodCall(
+                "Thread/get",
+                json!({
+                    "accountId": self.account_id,
+                    "ids": ids
+                }),
+                "0".to_string(),
+            )],
+        };
+
+        let response = self.call(request)?;
+
+        if let Some(method_response) = response.method_responses.first() {
+            if method_response.0 == "Thread/get" {
+                let thread_response: super::types::ThreadGetResponse =
+                    serde_json::from_value(method_response.1.clone())
+                        .map_err(|e| JmapError::Parse(e.to_string()))?;
+                log_info!(
+                    "[JMAP] Thread/get returned {} threads",
+                    thread_response.list.len()
+                );
+                return Ok(thread_response.list);
+            }
+        }
+
+        Err(JmapError::Api("Unexpected response".to_string()))
+    }
+
+    pub fn query_thread_emails(&self, thread_id: &str) -> Result<Vec<Email>, JmapError> {
+        log_info!("[JMAP] Querying emails for thread: {}", thread_id);
+
+        let request = JmapRequest {
+            using: vec!["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            method_calls: vec![MethodCall(
+                "Email/query",
+                json!({
+                    "accountId": self.account_id,
+                    "filter": { "inThread": thread_id },
+                    "sort": [{ "property": "receivedAt", "isAscending": true }],
+                    "limit": 500
+                }),
+                "0".to_string(),
+            )],
+        };
+
+        let response = self.call(request)?;
+
+        let ids = if let Some(method_response) = response.method_responses.first() {
+            if method_response.0 == "Email/query" {
+                let query_response: EmailQueryResponse =
+                    serde_json::from_value(method_response.1.clone())
+                        .map_err(|e| JmapError::Parse(e.to_string()))?;
+                query_response.ids
+            } else {
+                return Err(JmapError::Api("Unexpected response".to_string()));
+            }
+        } else {
+            return Err(JmapError::Api("Unexpected response".to_string()));
+        };
+
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        self.get_emails(&ids)
     }
 
     pub fn get_email_raw(&self, id: &str) -> Result<Option<String>, JmapError> {

@@ -126,6 +126,8 @@ pub struct EmailQueryResult {
 pub struct Email {
     pub id: String,
     #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
     pub from: Option<Vec<EmailAddress>>,
     #[serde(default)]
     pub to: Option<Vec<EmailAddress>>,
@@ -208,6 +210,27 @@ pub struct EmailGetResponse {
     #[allow(dead_code)]
     pub state: String,
     pub list: Vec<Email>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub not_found: Vec<String>,
+}
+
+// Thread types
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Thread {
+    pub id: String,
+    pub email_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadGetResponse {
+    #[allow(dead_code)]
+    pub account_id: String,
+    #[allow(dead_code)]
+    pub state: String,
+    pub list: Vec<Thread>,
     #[serde(default)]
     #[allow(dead_code)]
     pub not_found: Vec<String>,

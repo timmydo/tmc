@@ -5,6 +5,7 @@ use crate::tui::input::Key;
 use crate::tui::screen::Terminal;
 use crate::tui::views::email_view::EmailView;
 use crate::tui::views::help::HelpView;
+use crate::tui::views::thread_view::ThreadView;
 use crate::tui::views::{View, ViewAction};
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -49,6 +50,7 @@ pub struct EmailListView {
     status_message: Option<String>,
     next_write_op_id: u64,
     pending_write_ops: HashMap<u64, PendingWriteOp>,
+    thread_sizes: HashMap<String, usize>,
 }
 
 impl EmailListView {
@@ -84,6 +86,7 @@ impl EmailListView {
             status_message: None,
             next_write_op_id: 1,
             pending_write_ops: HashMap::new(),
+            thread_sizes: HashMap::new(),
         }
     }
 
@@ -143,9 +146,13 @@ impl EmailListView {
         email.keywords.contains_key("$flagged")
     }
 
-    fn format_email(email: &Email, width: u16) -> String {
+    fn format_email(email: &Email, width: u16, thread_size: Option<usize>) -> String {
         let unread = if Self::is_unread(email) { "N" } else { " " };
         let flagged = if Self::is_flagged(email) { "F" } else { " " };
+        let thread_indicator = match thread_size {
+            Some(n) if n > 1 => format!("[{}]", n),
+            _ => String::new(),
+        };
 
         let from = email
             .from
@@ -167,21 +174,44 @@ impl EmailListView {
             .unwrap_or("");
 
         let w = width as usize;
-        let from_width = 20.min(w.saturating_sub(19));
-        let subj_width = w.saturating_sub(19 + from_width);
+        let prefix_len =
+            4 + thread_indicator.len() + if thread_indicator.is_empty() { 0 } else { 1 };
+        let from_width = 20.min(w.saturating_sub(15 + prefix_len));
+        let subj_width = w.saturating_sub(15 + prefix_len + from_width);
 
         let from_display = truncate(from, from_width);
         let subj_display = truncate(subject, subj_width);
 
-        format!(
-            " {}{} {} {:from_w$} {}",
-            unread,
-            flagged,
-            date,
-            from_display,
-            subj_display,
-            from_w = from_width
-        )
+        if thread_indicator.is_empty() {
+            format!(
+                " {}{} {} {:from_w$} {}",
+                unread,
+                flagged,
+                date,
+                from_display,
+                subj_display,
+                from_w = from_width
+            )
+        } else {
+            format!(
+                " {}{}{} {} {:from_w$} {}",
+                unread,
+                flagged,
+                thread_indicator,
+                date,
+                from_display,
+                subj_display,
+                from_w = from_width
+            )
+        }
+    }
+
+    fn get_thread_size(&self, email: &Email) -> Option<usize> {
+        email
+            .thread_id
+            .as_ref()
+            .and_then(|tid| self.thread_sizes.get(tid))
+            .copied()
     }
 
     fn next_op_id(&mut self) -> u64 {
@@ -227,6 +257,65 @@ impl EmailListView {
                     *total = total.saturating_add(1);
                 }
             }
+        }
+    }
+
+    fn open_selected(&mut self) -> Option<ViewAction> {
+        let email = self.emails.get(self.cursor)?;
+        let email_id = email.id.clone();
+        let thread_size = self.get_thread_size(email).unwrap_or(1);
+
+        if thread_size > 1 {
+            // Open thread view
+            let thread_id = email.thread_id.clone().unwrap_or_default();
+            let subject = email
+                .subject
+                .clone()
+                .unwrap_or_else(|| "(no subject)".to_string());
+            let view = ThreadView::new(
+                self.cmd_tx.clone(),
+                self.from_address.clone(),
+                thread_id,
+                subject,
+            );
+            Some(ViewAction::Push(Box::new(view)))
+        } else {
+            // Open single email view
+            let was_seen = email.keywords.contains_key("$seen");
+            let view = EmailView::new(
+                self.cmd_tx.clone(),
+                self.from_address.clone(),
+                email_id.clone(),
+            );
+            let _ = self.cmd_tx.send(BackendCommand::GetEmail {
+                id: email_id.clone(),
+            });
+            if !was_seen {
+                let op_id = self.next_op_id();
+                self.pending_write_ops.insert(
+                    op_id,
+                    PendingWriteOp::Seen {
+                        email_id: email_id.clone(),
+                        old_seen: false,
+                    },
+                );
+                self.set_email_seen_state(&email_id, true);
+                if let Err(e) = self.cmd_tx.send(BackendCommand::MarkEmailRead {
+                    op_id,
+                    id: email_id.clone(),
+                }) {
+                    self.record_send_failure(
+                        op_id,
+                        PendingWriteOp::Seen {
+                            email_id,
+                            old_seen: false,
+                        },
+                        "Mark read",
+                        e.to_string(),
+                    );
+                }
+            }
+            Some(ViewAction::Push(Box::new(view)))
         }
     }
 
@@ -342,7 +431,8 @@ impl View for EmailListView {
                 term.move_to(row, 1)?;
 
                 let display_idx = scroll_offset + i;
-                let line = Self::format_email(email, term.cols);
+                let thread_size = self.get_thread_size(email);
+                let line = Self::format_email(email, term.cols, thread_size);
 
                 if display_idx == self.cursor {
                     term.set_reverse()?;
@@ -551,48 +641,7 @@ impl View for EmailListView {
                 }
                 ViewAction::Continue
             }
-            Key::Enter => {
-                if let Some(email) = self.emails.get(self.cursor) {
-                    let email_id = email.id.clone();
-                    let was_seen = email.keywords.contains_key("$seen");
-                    let view = EmailView::new(
-                        self.cmd_tx.clone(),
-                        self.from_address.clone(),
-                        email_id.clone(),
-                    );
-                    let _ = self.cmd_tx.send(BackendCommand::GetEmail {
-                        id: email_id.clone(),
-                    });
-                    if !was_seen {
-                        let op_id = self.next_op_id();
-                        self.pending_write_ops.insert(
-                            op_id,
-                            PendingWriteOp::Seen {
-                                email_id: email_id.clone(),
-                                old_seen: false,
-                            },
-                        );
-                        self.set_email_seen_state(&email_id, true);
-                        if let Err(e) = self.cmd_tx.send(BackendCommand::MarkEmailRead {
-                            op_id,
-                            id: email_id.clone(),
-                        }) {
-                            self.record_send_failure(
-                                op_id,
-                                PendingWriteOp::Seen {
-                                    email_id,
-                                    old_seen: false,
-                                },
-                                "Mark read",
-                                e.to_string(),
-                            );
-                        }
-                    }
-                    ViewAction::Push(Box::new(view))
-                } else {
-                    ViewAction::Continue
-                }
-            }
+            Key::Enter => self.open_selected().unwrap_or(ViewAction::Continue),
             Key::Char('g') => {
                 self.request_refresh();
                 ViewAction::Continue
@@ -731,44 +780,7 @@ impl View for EmailListView {
     fn take_pending_action(&mut self) -> Option<ViewAction> {
         if self.pending_click {
             self.pending_click = false;
-            if let Some(email) = self.emails.get(self.cursor) {
-                let email_id = email.id.clone();
-                let was_seen = email.keywords.contains_key("$seen");
-                let view = EmailView::new(
-                    self.cmd_tx.clone(),
-                    self.from_address.clone(),
-                    email_id.clone(),
-                );
-                let _ = self.cmd_tx.send(BackendCommand::GetEmail {
-                    id: email_id.clone(),
-                });
-                if !was_seen {
-                    let op_id = self.next_op_id();
-                    self.pending_write_ops.insert(
-                        op_id,
-                        PendingWriteOp::Seen {
-                            email_id: email_id.clone(),
-                            old_seen: false,
-                        },
-                    );
-                    self.set_email_seen_state(&email_id, true);
-                    if let Err(e) = self.cmd_tx.send(BackendCommand::MarkEmailRead {
-                        op_id,
-                        id: email_id.clone(),
-                    }) {
-                        self.record_send_failure(
-                            op_id,
-                            PendingWriteOp::Seen {
-                                email_id,
-                                old_seen: false,
-                            },
-                            "Mark read",
-                            e.to_string(),
-                        );
-                    }
-                }
-                return Some(ViewAction::Push(Box::new(view)));
-            }
+            return self.open_selected();
         }
         None
     }
@@ -781,6 +793,7 @@ impl View for EmailListView {
                 total,
                 position,
                 loaded,
+                thread_sizes,
             } if *mailbox_id == self.mailbox_id => {
                 self.loading = false;
                 self.loading_more = false;
@@ -792,7 +805,10 @@ impl View for EmailListView {
                         if *position == 0 {
                             self.emails = emails.clone();
                             self.pending_write_ops.clear();
+                            self.thread_sizes = thread_sizes.clone();
                         } else {
+                            self.thread_sizes
+                                .extend(thread_sizes.iter().map(|(k, v)| (k.clone(), *v)));
                             let mut existing_ids: HashSet<String> =
                                 self.emails.iter().map(|e| e.id.clone()).collect();
                             for email in emails {
