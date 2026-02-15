@@ -34,7 +34,7 @@ cargo fmt -- --check
 - **TUI**: Terminal UI using a notmuch/emacs-inspired keybinding scheme
 - **Threading model**: The UI runs on its own logical thread; background tasks (JMAP fetches, sync) run on separate threads so the UI is never blocked
 - **JMAP-only**: No IMAP/POP/mbox support. Connects to a JMAP server for all mail operations
-- **$EDITOR integration**: Composing/replying launches `$EDITOR` in a subprocess; the TUI suspends and resumes after the editor exits
+- **$EDITOR integration**: Composing/replying spawns `$EDITOR` as a background process with a draft file; the editor/script is responsible for sending — tmc does NOT send email or do JMAP submission
 - **No async runtime**: Uses blocking I/O with threads, not tokio/async-std
 
 ## Key Design Principles

@@ -95,11 +95,10 @@ The TUI operates as a stack of views. Pressing `RET` pushes a new view; pressing
 
 When composing or replying:
 1. Construct a draft in RFC 5322 message format (headers + body) in a temp file.
-2. Suspend the TUI (restore terminal to normal mode).
-3. Exec `$EDITOR <tempfile>` (falling back to `vi`).
-4. On editor exit, resume the TUI.
-5. Parse the edited file; confirm send or abort.
-6. Submit via JMAP `EmailSubmission/set` (RFC 8621 Section 7).
+2. Spawn `$EDITOR <tempfile>` as a background process (falling back to `vi`).
+3. The TUI remains interactive while the editor runs separately.
+4. The editor/script is responsible for sending the email — tmc does NOT submit mail.
+5. A background thread cleans up the temp file after the editor exits.
 
 ### JMAP Operations
 
@@ -112,7 +111,7 @@ All network access goes through a single `JmapClient` on the backend thread.
 | List emails        | Email/query           | RFC 8621 §4.4    |
 | Fetch emails       | Email/get             | RFC 8621 §4.2    |
 | Search emails      | Email/query (filter)  | RFC 8621 §4.4    |
-| Submit email       | EmailSubmission/set   | RFC 8621 §7      |
+| ~~Submit email~~   | ~~EmailSubmission/set~~| *(not used — editor/script sends)* |
 | Set flags          | Email/set (keywords)  | RFC 8621 §4.3    |
 | Create draft       | Email/set             | RFC 8621 §4.3    |
 | Delete email       | Email/set (destroy)   | RFC 8621 §4.3    |

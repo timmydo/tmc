@@ -28,11 +28,10 @@
 - [x] Loading indicators while fetching
 
 ## Phase 4: Compose & Reply
-- [ ] $EDITOR integration: suspend TUI, exec editor, resume
-- [ ] Compose new: create temp file with empty headers template
-- [ ] Reply/Reply-all: pre-fill headers and quoted body
-- [ ] Parse edited file back into JMAP Email/set + EmailSubmission/set
-- [ ] Confirm send / abort prompt
+- [x] Compose new: create temp file with empty headers template
+- [x] Reply/Reply-all: pre-fill headers and quoted body
+- [x] Spawn $EDITOR (or configured editor) as background process with draft file
+- [ ] NOTE: tmc does NOT send email — the editor/script is responsible for sending
 
 ## Phase 5: Email Management
 - [ ] Flag/unflag emails (Email/set keywords $flagged)
