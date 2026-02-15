@@ -18,6 +18,8 @@ pub enum Key {
     Delete,
     Ctrl(char),
     MouseClick { row: u16, col: u16 },
+    ScrollUp,
+    ScrollDown,
 }
 
 /// Read a single keypress from stdin.
@@ -131,14 +133,18 @@ fn parse_sgr_mouse() -> Key {
                 }
             }
             b'M' => {
-                // Press event — only handle left-click (btn == 0)
-                if params[0] == 0 && param_idx == 2 {
-                    return Key::MouseClick {
+                if param_idx != 2 {
+                    return Key::Escape;
+                }
+                return match params[0] {
+                    0 => Key::MouseClick {
                         row: params[2],
                         col: params[1],
-                    };
-                }
-                return Key::Escape;
+                    },
+                    64 => Key::ScrollUp,
+                    65 => Key::ScrollDown,
+                    _ => Key::Escape,
+                };
             }
             b'm' => {
                 // Release event — ignore

@@ -19,6 +19,7 @@ pub struct MailboxListView {
     error: Option<String>,
     account_names: Vec<String>,
     current_account: String,
+    pending_click: bool,
 }
 
 impl MailboxListView {
@@ -39,6 +40,7 @@ impl MailboxListView {
             error: None,
             account_names,
             current_account,
+            pending_click: false,
         }
     }
 
@@ -260,6 +262,18 @@ impl View for MailboxListView {
                 }
             }
             Key::Char('?') => ViewAction::Push(Box::new(HelpView::new())),
+            Key::ScrollUp => {
+                if self.cursor > 0 {
+                    self.cursor -= 1;
+                }
+                ViewAction::Continue
+            }
+            Key::ScrollDown => {
+                if !self.mailboxes.is_empty() && self.cursor + 1 < self.mailboxes.len() {
+                    self.cursor += 1;
+                }
+                ViewAction::Continue
+            }
             Key::MouseClick { row, col: _ } => {
                 if row >= 3 && !self.mailboxes.is_empty() {
                     let max_items = (term_rows as usize).saturating_sub(4);
@@ -271,13 +285,35 @@ impl View for MailboxListView {
                     let clicked = scroll_offset + (row - 3) as usize;
                     if clicked < self.mailboxes.len() {
                         self.cursor = clicked;
-                        return self.handle_key(Key::Enter, term_rows);
+                        self.pending_click = true;
+                        return ViewAction::Continue;
                     }
                 }
                 ViewAction::Continue
             }
             _ => ViewAction::Continue,
         }
+    }
+
+    fn take_pending_action(&mut self) -> Option<ViewAction> {
+        if self.pending_click {
+            self.pending_click = false;
+            if let Some(mailbox) = self.mailboxes.get(self.cursor) {
+                let view = EmailListView::new(
+                    self.cmd_tx.clone(),
+                    self.from_address.clone(),
+                    mailbox.id.clone(),
+                    mailbox.name.clone(),
+                    self.page_size,
+                );
+                let _ = self.cmd_tx.send(BackendCommand::QueryEmails {
+                    mailbox_id: mailbox.id.clone(),
+                    page_size: self.page_size,
+                });
+                return Some(ViewAction::Push(Box::new(view)));
+            }
+        }
+        None
     }
 
     fn on_response(&mut self, response: &BackendResponse) -> bool {

@@ -230,6 +230,18 @@ impl View for EmailView {
                 ViewAction::Compose(draft)
             }
             Key::Char('?') => ViewAction::Push(Box::new(HelpView::new())),
+            Key::ScrollUp => {
+                if self.scroll > 0 {
+                    self.scroll -= 1;
+                }
+                ViewAction::Continue
+            }
+            Key::ScrollDown => {
+                if self.scroll + 1 < self.lines.len() {
+                    self.scroll += 1;
+                }
+                ViewAction::Continue
+            }
             _ => ViewAction::Continue,
         }
     }

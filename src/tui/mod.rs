@@ -65,6 +65,23 @@ pub fn run(
             stack.render_current(&mut term)?;
         }
 
+        // Check for pending actions (e.g. mouse click that rendered feedback first)
+        if let Some(view) = stack.current_mut() {
+            if let Some(action) = view.take_pending_action() {
+                match action {
+                    ViewAction::Push(new_view) => {
+                        stack.push(new_view);
+                        stack.render_current(&mut term)?;
+                    }
+                    ViewAction::Compose(draft_text) => {
+                        spawn_editor(&draft_text, &editor_cmd);
+                        stack.render_current(&mut term)?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         if let Some(key) = read_key() {
             let action = match stack.handle_key(key, term.rows) {
                 Some(action) => action,

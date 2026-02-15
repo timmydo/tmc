@@ -20,6 +20,7 @@ pub struct EmailListView {
     total: Option<u32>,
     loading: bool,
     error: Option<String>,
+    pending_click: bool,
 }
 
 impl EmailListView {
@@ -41,6 +42,7 @@ impl EmailListView {
             total: None,
             loading: true,
             error: None,
+            pending_click: false,
         }
     }
 
@@ -263,6 +265,18 @@ impl View for EmailListView {
                 ViewAction::Compose(draft)
             }
             Key::Char('?') => ViewAction::Push(Box::new(HelpView::new())),
+            Key::ScrollUp => {
+                if self.cursor > 0 {
+                    self.cursor -= 1;
+                }
+                ViewAction::Continue
+            }
+            Key::ScrollDown => {
+                if !self.emails.is_empty() && self.cursor + 1 < self.emails.len() {
+                    self.cursor += 1;
+                }
+                ViewAction::Continue
+            }
             Key::MouseClick { row, col: _ } => {
                 if row >= 3 && !self.emails.is_empty() {
                     let max_items = (term_rows as usize).saturating_sub(4);
@@ -274,13 +288,32 @@ impl View for EmailListView {
                     let clicked = scroll_offset + (row - 3) as usize;
                     if clicked < self.emails.len() {
                         self.cursor = clicked;
-                        return self.handle_key(Key::Enter, term_rows);
+                        self.pending_click = true;
+                        return ViewAction::Continue;
                     }
                 }
                 ViewAction::Continue
             }
             _ => ViewAction::Continue,
         }
+    }
+
+    fn take_pending_action(&mut self) -> Option<ViewAction> {
+        if self.pending_click {
+            self.pending_click = false;
+            if let Some(email) = self.emails.get(self.cursor) {
+                let view = EmailView::new(
+                    self.cmd_tx.clone(),
+                    self.from_address.clone(),
+                    email.id.clone(),
+                );
+                let _ = self.cmd_tx.send(BackendCommand::GetEmail {
+                    id: email.id.clone(),
+                });
+                return Some(ViewAction::Push(Box::new(view)));
+            }
+        }
+        None
     }
 
     fn on_response(&mut self, response: &BackendResponse) -> bool {

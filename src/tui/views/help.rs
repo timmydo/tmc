@@ -137,6 +137,18 @@ impl View for HelpView {
                 self.scroll = self.lines.len().saturating_sub(1);
                 ViewAction::Continue
             }
+            Key::ScrollUp => {
+                if self.scroll > 0 {
+                    self.scroll -= 1;
+                }
+                ViewAction::Continue
+            }
+            Key::ScrollDown => {
+                if self.scroll + 1 < self.lines.len() {
+                    self.scroll += 1;
+                }
+                ViewAction::Continue
+            }
             _ => ViewAction::Continue,
         }
     }
