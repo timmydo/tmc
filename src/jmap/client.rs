@@ -398,6 +398,44 @@ impl JmapClient {
         Err(JmapError::Api("Unexpected response".to_string()))
     }
 
+    pub fn mark_email_read(&self, id: &str) -> Result<(), JmapError> {
+        log_info!("[JMAP] Email/set marking as read: {}", id);
+
+        let request = JmapRequest {
+            using: vec!["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            method_calls: vec![MethodCall(
+                "Email/set",
+                json!({
+                    "accountId": self.account_id,
+                    "update": {
+                        id: {
+                            "keywords/$seen": true
+                        }
+                    }
+                }),
+                "0".to_string(),
+            )],
+        };
+
+        let response = self.call(request)?;
+
+        if let Some(method_response) = response.method_responses.first() {
+            if method_response.0 == "Email/set" {
+                if let Some(not_updated) = method_response.1.get("notUpdated") {
+                    if not_updated.get(id).is_some() {
+                        return Err(JmapError::Api(format!(
+                            "Failed to mark email as read: {:?}",
+                            not_updated
+                        )));
+                    }
+                }
+                return Ok(());
+            }
+        }
+
+        Err(JmapError::Api("Unexpected response for Email/set".to_string()))
+    }
+
     pub fn get_email_raw(&self, id: &str) -> Result<Option<String>, JmapError> {
         log_info!("[JMAP] Fetching raw email via blob: {}", id);
 

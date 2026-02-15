@@ -242,7 +242,7 @@ impl View for EmailListView {
                 ViewAction::Continue
             }
             Key::Enter => {
-                if let Some(email) = self.emails.get(self.cursor) {
+                if let Some(email) = self.emails.get_mut(self.cursor) {
                     let view = EmailView::new(
                         self.cmd_tx.clone(),
                         self.from_address.clone(),
@@ -251,6 +251,12 @@ impl View for EmailListView {
                     let _ = self.cmd_tx.send(BackendCommand::GetEmail {
                         id: email.id.clone(),
                     });
+                    if !email.keywords.contains_key("$seen") {
+                        email.keywords.insert("$seen".to_string(), true);
+                        let _ = self.cmd_tx.send(BackendCommand::MarkEmailRead {
+                            id: email.id.clone(),
+                        });
+                    }
                     ViewAction::Push(Box::new(view))
                 } else {
                     ViewAction::Continue
@@ -301,7 +307,7 @@ impl View for EmailListView {
     fn take_pending_action(&mut self) -> Option<ViewAction> {
         if self.pending_click {
             self.pending_click = false;
-            if let Some(email) = self.emails.get(self.cursor) {
+            if let Some(email) = self.emails.get_mut(self.cursor) {
                 let view = EmailView::new(
                     self.cmd_tx.clone(),
                     self.from_address.clone(),
@@ -310,6 +316,12 @@ impl View for EmailListView {
                 let _ = self.cmd_tx.send(BackendCommand::GetEmail {
                     id: email.id.clone(),
                 });
+                if !email.keywords.contains_key("$seen") {
+                    email.keywords.insert("$seen".to_string(), true);
+                    let _ = self.cmd_tx.send(BackendCommand::MarkEmailRead {
+                        id: email.id.clone(),
+                    });
+                }
                 return Some(ViewAction::Push(Box::new(view)));
             }
         }

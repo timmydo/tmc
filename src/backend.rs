@@ -16,6 +16,9 @@ pub enum BackendCommand {
     GetEmailForReply {
         id: String,
     },
+    MarkEmailRead {
+        id: String,
+    },
     Shutdown,
 }
 
@@ -120,6 +123,11 @@ fn backend_loop(
                     id,
                     result: Box::new(result),
                 });
+            }
+            BackendCommand::MarkEmailRead { id } => {
+                if let Err(e) = client.mark_email_read(&id) {
+                    log_warn!("Failed to mark email {} as read: {}", id, e);
+                }
             }
             BackendCommand::Shutdown => {
                 break;
