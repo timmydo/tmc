@@ -44,7 +44,45 @@ fn run_password_command(cmd: &str) -> Result<String, String> {
     Ok(password.trim_end_matches('\n').to_string())
 }
 
+fn show_log() {
+    let path = log::log_path();
+    if !path.exists() {
+        eprintln!("No log file found at {}", path.display());
+        std::process::exit(1);
+    }
+    let pager = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
+    let status = Command::new(&pager)
+        .arg(&path)
+        .status();
+    match status {
+        Ok(s) if s.success() => {}
+        Ok(s) => std::process::exit(s.code().unwrap_or(1)),
+        Err(e) => {
+            eprintln!("Failed to launch pager '{}': {}", pager, e);
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        eprintln!("Usage: tmc [--log]");
+        eprintln!();
+        eprintln!("Options:");
+        eprintln!("  --log    View the log file in $PAGER");
+        eprintln!("  --help   Show this help");
+        std::process::exit(0);
+    }
+
+    if args.iter().any(|a| a == "--log") {
+        show_log();
+        std::process::exit(0);
+    }
+
+    log::init();
+
     let config_path = default_config_path();
     let config = match Config::load(&config_path) {
         Ok(c) => c,

@@ -1,4 +1,46 @@
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::SystemTime;
+
+static LOG_FILE: Mutex<Option<File>> = Mutex::new(None);
+
+/// Return the log file path: $XDG_STATE_HOME/tmc/tmc.log
+pub fn log_path() -> PathBuf {
+    let state_dir = if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
+        PathBuf::from(xdg)
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".local").join("state")
+    } else {
+        PathBuf::from(".")
+    };
+    state_dir.join("tmc").join("tmc.log")
+}
+
+/// Initialize the log file. Call once at startup.
+pub fn init() {
+    let path = log_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(file) = OpenOptions::new().create(true).append(true).open(&path) {
+        if let Ok(mut guard) = LOG_FILE.lock() {
+            *guard = Some(file);
+        }
+    }
+}
+
+/// Write a log line to the file.
+pub fn write_log(level: &str, msg: &str) {
+    let ts = timestamp();
+    let line = format!("[{}] [{}] {}\n", ts, level, msg);
+    if let Ok(mut guard) = LOG_FILE.lock() {
+        if let Some(ref mut f) = *guard {
+            let _ = f.write_all(line.as_bytes());
+        }
+    }
+}
 
 /// Format current timestamp as ISO 8601
 fn timestamp() -> String {
@@ -56,35 +98,30 @@ fn timestamp() -> String {
     )
 }
 
-/// Get current timestamp string (used by macros)
-pub fn now() -> String {
-    timestamp()
-}
-
 #[macro_export]
 macro_rules! log_info {
     ($($arg:tt)*) => {
-        eprintln!("[{}] [INFO] {}", $crate::log::now(), format!($($arg)*))
+        $crate::log::write_log("INFO", &format!($($arg)*))
     };
 }
 
 #[macro_export]
 macro_rules! log_debug {
     ($($arg:tt)*) => {
-        eprintln!("[{}] [DEBUG] {}", $crate::log::now(), format!($($arg)*))
+        $crate::log::write_log("DEBUG", &format!($($arg)*))
     };
 }
 
 #[macro_export]
 macro_rules! log_error {
     ($($arg:tt)*) => {
-        eprintln!("[{}] [ERROR] {}", $crate::log::now(), format!($($arg)*))
+        $crate::log::write_log("ERROR", &format!($($arg)*))
     };
 }
 
 #[macro_export]
 macro_rules! log_warn {
     ($($arg:tt)*) => {
-        eprintln!("[{}] [WARN] {}", $crate::log::now(), format!($($arg)*))
+        $crate::log::write_log("WARN", &format!($($arg)*))
     };
 }
