@@ -107,6 +107,10 @@ impl EmailView {
 }
 
 impl View for EmailView {
+    fn wants_mouse(&self) -> bool {
+        false
+    }
+
     fn render(&self, term: &mut Terminal) -> io::Result<()> {
         term.clear()?;
 

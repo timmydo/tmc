@@ -13,7 +13,8 @@ pub struct Terminal {
     out: BufWriter<Stdout>,
     pub rows: u16,
     pub cols: u16,
-    mouse: bool,
+    mouse_supported: bool,
+    mouse_enabled: bool,
 }
 
 impl Terminal {
@@ -64,8 +65,23 @@ impl Terminal {
             out,
             rows,
             cols,
-            mouse,
+            mouse_supported: mouse,
+            mouse_enabled: mouse,
         })
+    }
+
+    pub fn set_mouse_enabled(&mut self, enabled: bool) -> io::Result<()> {
+        if !self.mouse_supported || self.mouse_enabled == enabled {
+            return Ok(());
+        }
+
+        if enabled {
+            write!(self.out, "\x1b[?1000h\x1b[?1006h")?;
+        } else {
+            write!(self.out, "\x1b[?1000l\x1b[?1006l")?;
+        }
+        self.mouse_enabled = enabled;
+        self.out.flush()
     }
 
     /// Check if a resize was signaled and update dimensions.
@@ -131,7 +147,7 @@ impl Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        if self.mouse {
+        if self.mouse_enabled {
             // Disable mouse tracking
             let _ = write!(self.out, "\x1b[?1000l\x1b[?1006l");
         }

@@ -12,6 +12,11 @@ use std::io;
 use views::mailbox_list::MailboxListView;
 use views::{ViewAction, ViewStack};
 
+fn sync_mouse_for_view(term: &mut Terminal, stack: &ViewStack) -> io::Result<()> {
+    let wants_mouse = stack.current().map(|v| v.wants_mouse()).unwrap_or(true);
+    term.set_mouse_enabled(wants_mouse)
+}
+
 pub fn run(
     client: JmapClient,
     accounts: Vec<AccountConfig>,
@@ -41,10 +46,12 @@ pub fn run(
         .or_else(|| std::env::var("EDITOR").ok())
         .unwrap_or_else(|| "vi".to_string());
 
+    sync_mouse_for_view(&mut term, &stack)?;
     stack.render_current(&mut term)?;
 
     loop {
         if term.check_resize() {
+            sync_mouse_for_view(&mut term, &stack)?;
             stack.render_current(&mut term)?;
         }
 
@@ -62,6 +69,7 @@ pub fn run(
             }
         }
         if needs_render {
+            sync_mouse_for_view(&mut term, &stack)?;
             stack.render_current(&mut term)?;
         }
 
@@ -71,10 +79,12 @@ pub fn run(
                 match action {
                     ViewAction::Push(new_view) => {
                         stack.push(new_view);
+                        sync_mouse_for_view(&mut term, &stack)?;
                         stack.render_current(&mut term)?;
                     }
                     ViewAction::Compose(draft_text) => {
                         spawn_editor(&draft_text, &editor_cmd);
+                        sync_mouse_for_view(&mut term, &stack)?;
                         stack.render_current(&mut term)?;
                     }
                     _ => {}
@@ -90,16 +100,19 @@ pub fn run(
 
             match action {
                 ViewAction::Continue => {
+                    sync_mouse_for_view(&mut term, &stack)?;
                     stack.render_current(&mut term)?;
                 }
                 ViewAction::Push(new_view) => {
                     stack.push(new_view);
+                    sync_mouse_for_view(&mut term, &stack)?;
                     stack.render_current(&mut term)?;
                 }
                 ViewAction::Pop => {
                     if !stack.pop() {
                         break;
                     }
+                    sync_mouse_for_view(&mut term, &stack)?;
                     stack.render_current(&mut term)?;
                 }
                 ViewAction::Quit => {
@@ -107,6 +120,7 @@ pub fn run(
                 }
                 ViewAction::Compose(draft_text) => {
                     spawn_editor(&draft_text, &editor_cmd);
+                    sync_mouse_for_view(&mut term, &stack)?;
                     stack.render_current(&mut term)?;
                 }
                 ViewAction::SwitchAccount(name) => {
@@ -139,6 +153,7 @@ pub fn run(
                                 // Stay on current account, just re-render
                             }
                         }
+                        sync_mouse_for_view(&mut term, &stack)?;
                         stack.render_current(&mut term)?;
                     }
                 }

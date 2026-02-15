@@ -20,6 +20,10 @@ pub enum ViewAction {
 pub trait View {
     fn render(&self, term: &mut Terminal) -> io::Result<()>;
     fn handle_key(&mut self, key: Key, term_rows: u16) -> ViewAction;
+    /// Whether this view wants terminal mouse tracking enabled.
+    fn wants_mouse(&self) -> bool {
+        true
+    }
     /// Handle a response from the backend thread.
     /// Returns true if the view consumed the response and should re-render.
     fn on_response(&mut self, response: &BackendResponse) -> bool;
@@ -63,6 +67,10 @@ impl ViewStack {
 
     pub fn current_mut(&mut self) -> Option<&mut Box<dyn View>> {
         self.views.last_mut()
+    }
+
+    pub fn current(&self) -> Option<&dyn View> {
+        self.views.last().map(|v| v.as_ref())
     }
 
     pub fn push(&mut self, view: Box<dyn View>) {
