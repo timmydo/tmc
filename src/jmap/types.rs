@@ -62,7 +62,11 @@ pub struct JmapResponse {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct MethodResponse(pub String, pub serde_json::Value, #[allow(dead_code)] pub String);
+pub struct MethodResponse(
+    pub String,
+    pub serde_json::Value,
+    #[allow(dead_code)] pub String,
+);
 
 // Mailbox types
 #[derive(Debug, Deserialize, Clone)]

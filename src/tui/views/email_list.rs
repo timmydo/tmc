@@ -1,4 +1,4 @@
-use crate::backend::{BackendCommand, BackendResponse};
+use crate::backend::{BackendCommand, BackendResponse, EmailMutationAction};
 use crate::compose;
 use crate::jmap::types::{Email, Mailbox};
 use crate::tui::input::Key;
@@ -6,8 +6,24 @@ use crate::tui::screen::Terminal;
 use crate::tui::views::email_view::EmailView;
 use crate::tui::views::help::HelpView;
 use crate::tui::views::{View, ViewAction};
+use std::collections::HashMap;
 use std::io;
 use std::sync::mpsc;
+
+enum PendingWriteOp {
+    Flag {
+        email_id: String,
+        old_flagged: bool,
+    },
+    Seen {
+        email_id: String,
+        old_seen: bool,
+    },
+    Move {
+        email: Box<Email>,
+        from_index: usize,
+    },
+}
 
 pub struct EmailListView {
     cmd_tx: mpsc::Sender<BackendCommand>,
@@ -27,6 +43,9 @@ pub struct EmailListView {
     search_mode: bool,
     search_input: String,
     active_search: Option<String>,
+    status_message: Option<String>,
+    next_write_op_id: u64,
+    pending_write_ops: HashMap<u64, PendingWriteOp>,
 }
 
 impl EmailListView {
@@ -56,6 +75,9 @@ impl EmailListView {
             search_mode: false,
             search_input: String::new(),
             active_search: None,
+            status_message: None,
+            next_write_op_id: 1,
+            pending_write_ops: HashMap::new(),
         }
     }
 
@@ -96,13 +118,7 @@ impl EmailListView {
         let date = email
             .received_at
             .as_deref()
-            .map(|d| {
-                if d.len() >= 10 {
-                    &d[..10]
-                } else {
-                    d
-                }
-            })
+            .map(|d| if d.len() >= 10 { &d[..10] } else { d })
             .unwrap_or("");
 
         let w = width as usize;
@@ -121,6 +137,58 @@ impl EmailListView {
             subj_display,
             from_w = from_width
         )
+    }
+
+    fn next_op_id(&mut self) -> u64 {
+        let id = self.next_write_op_id;
+        self.next_write_op_id = self.next_write_op_id.wrapping_add(1);
+        id
+    }
+
+    fn set_email_flag_state(&mut self, email_id: &str, flagged: bool) {
+        if let Some(email) = self.emails.iter_mut().find(|e| e.id == email_id) {
+            if flagged {
+                email.keywords.insert("$flagged".to_string(), true);
+            } else {
+                email.keywords.remove("$flagged");
+            }
+        }
+    }
+
+    fn set_email_seen_state(&mut self, email_id: &str, seen: bool) {
+        if let Some(email) = self.emails.iter_mut().find(|e| e.id == email_id) {
+            if seen {
+                email.keywords.insert("$seen".to_string(), true);
+            } else {
+                email.keywords.remove("$seen");
+            }
+        }
+    }
+
+    fn rollback_pending_write(&mut self, op: PendingWriteOp) {
+        match op {
+            PendingWriteOp::Flag {
+                email_id,
+                old_flagged,
+            } => self.set_email_flag_state(&email_id, old_flagged),
+            PendingWriteOp::Seen { email_id, old_seen } => {
+                self.set_email_seen_state(&email_id, old_seen)
+            }
+            PendingWriteOp::Move { email, from_index } => {
+                let insert_at = from_index.min(self.emails.len());
+                self.emails.insert(insert_at, *email);
+                self.cursor = insert_at;
+                if let Some(ref mut total) = self.total {
+                    *total = total.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    fn record_send_failure(&mut self, op_id: u64, op: PendingWriteOp, action: &str, err: String) {
+        self.pending_write_ops.remove(&op_id);
+        self.rollback_pending_write(op);
+        self.status_message = Some(format!("{} failed: {}", action, err));
     }
 }
 
@@ -147,7 +215,10 @@ impl View for EmailListView {
         term.set_bold()?;
         let header = if let Some(ref query) = self.active_search {
             match self.total {
-                Some(total) => format!("{} [search: {}] ({} results)", self.mailbox_name, query, total),
+                Some(total) => format!(
+                    "{} [search: {}] ({} results)",
+                    self.mailbox_name, query, total
+                ),
                 None => format!("{} [search: {}]", self.mailbox_name, query),
             }
         } else {
@@ -245,7 +316,7 @@ impl View for EmailListView {
         // Status bar
         term.move_to(term.rows, 1)?;
         term.set_reverse()?;
-        let status = if self.search_mode {
+        let base_status = if self.search_mode {
             format!(" Search: {}_", self.search_input)
         } else if self.move_mode {
             format!(
@@ -269,6 +340,11 @@ impl View for EmailListView {
                 self.emails.len(),
                 search_hint
             )
+        };
+        let status = if let Some(ref msg) = self.status_message {
+            format!("{} | {}", msg, base_status)
+        } else {
+            base_status
         };
         term.write_truncated(&status, term.cols)?;
         let remaining = (term.cols as usize).saturating_sub(status.len());
@@ -327,18 +403,41 @@ impl View for EmailListView {
                     }
                 }
                 Key::Enter => {
-                    if let Some(target) = self.mailboxes.get(self.move_cursor) {
-                        if let Some(email) = self.emails.get(self.cursor) {
-                            let _ = self.cmd_tx.send(BackendCommand::MoveEmail {
+                    if let Some(target_id) =
+                        self.mailboxes.get(self.move_cursor).map(|m| m.id.clone())
+                    {
+                        if let Some(email) = self.emails.get(self.cursor).cloned() {
+                            let op_id = self.next_op_id();
+                            let from_index = self.cursor;
+                            self.pending_write_ops.insert(
+                                op_id,
+                                PendingWriteOp::Move {
+                                    email: Box::new(email.clone()),
+                                    from_index,
+                                },
+                            );
+                            let send_result = self.cmd_tx.send(BackendCommand::MoveEmail {
+                                op_id,
                                 id: email.id.clone(),
-                                to_mailbox_id: target.id.clone(),
+                                to_mailbox_id: target_id,
                             });
-                            self.emails.remove(self.cursor);
+                            self.emails.remove(from_index);
                             if self.cursor >= self.emails.len() && self.cursor > 0 {
                                 self.cursor -= 1;
                             }
                             if let Some(ref mut total) = self.total {
                                 *total = total.saturating_sub(1);
+                            }
+                            if let Err(e) = send_result {
+                                self.record_send_failure(
+                                    op_id,
+                                    PendingWriteOp::Move {
+                                        email: Box::new(email),
+                                        from_index,
+                                    },
+                                    "Move",
+                                    e.to_string(),
+                                );
                             }
                         }
                         self.move_mode = false;
@@ -396,20 +495,41 @@ impl View for EmailListView {
                 ViewAction::Continue
             }
             Key::Enter => {
-                if let Some(email) = self.emails.get_mut(self.cursor) {
+                if let Some(email) = self.emails.get(self.cursor) {
+                    let email_id = email.id.clone();
+                    let was_seen = email.keywords.contains_key("$seen");
                     let view = EmailView::new(
                         self.cmd_tx.clone(),
                         self.from_address.clone(),
-                        email.id.clone(),
+                        email_id.clone(),
                     );
                     let _ = self.cmd_tx.send(BackendCommand::GetEmail {
-                        id: email.id.clone(),
+                        id: email_id.clone(),
                     });
-                    if !email.keywords.contains_key("$seen") {
-                        email.keywords.insert("$seen".to_string(), true);
-                        let _ = self.cmd_tx.send(BackendCommand::MarkEmailRead {
-                            id: email.id.clone(),
-                        });
+                    if !was_seen {
+                        let op_id = self.next_op_id();
+                        self.pending_write_ops.insert(
+                            op_id,
+                            PendingWriteOp::Seen {
+                                email_id: email_id.clone(),
+                                old_seen: false,
+                            },
+                        );
+                        self.set_email_seen_state(&email_id, true);
+                        if let Err(e) = self.cmd_tx.send(BackendCommand::MarkEmailRead {
+                            op_id,
+                            id: email_id.clone(),
+                        }) {
+                            self.record_send_failure(
+                                op_id,
+                                PendingWriteOp::Seen {
+                                    email_id,
+                                    old_seen: false,
+                                },
+                                "Mark read",
+                                e.to_string(),
+                            );
+                        }
                     }
                     ViewAction::Push(Box::new(view))
                 } else {
@@ -421,33 +541,69 @@ impl View for EmailListView {
                 ViewAction::Continue
             }
             Key::Char('f') => {
-                if let Some(email) = self.emails.get_mut(self.cursor) {
-                    let is_flagged = email.keywords.contains_key("$flagged");
-                    if is_flagged {
-                        email.keywords.remove("$flagged");
-                    } else {
-                        email.keywords.insert("$flagged".to_string(), true);
+                if let Some(email) = self.emails.get(self.cursor) {
+                    let email_id = email.id.clone();
+                    let old_flagged = email.keywords.contains_key("$flagged");
+                    let new_flagged = !old_flagged;
+                    let op_id = self.next_op_id();
+                    self.pending_write_ops.insert(
+                        op_id,
+                        PendingWriteOp::Flag {
+                            email_id: email_id.clone(),
+                            old_flagged,
+                        },
+                    );
+                    self.set_email_flag_state(&email_id, new_flagged);
+                    if let Err(e) = self.cmd_tx.send(BackendCommand::SetEmailFlagged {
+                        op_id,
+                        id: email_id.clone(),
+                        flagged: new_flagged,
+                    }) {
+                        self.record_send_failure(
+                            op_id,
+                            PendingWriteOp::Flag {
+                                email_id,
+                                old_flagged,
+                            },
+                            "Flag update",
+                            e.to_string(),
+                        );
                     }
-                    let _ = self.cmd_tx.send(BackendCommand::SetEmailFlagged {
-                        id: email.id.clone(),
-                        flagged: !is_flagged,
-                    });
                 }
                 ViewAction::Continue
             }
             Key::Char('u') => {
-                if let Some(email) = self.emails.get_mut(self.cursor) {
-                    let is_read = email.keywords.contains_key("$seen");
-                    if is_read {
-                        email.keywords.remove("$seen");
-                        let _ = self.cmd_tx.send(BackendCommand::MarkEmailUnread {
-                            id: email.id.clone(),
-                        });
+                if let Some(email) = self.emails.get(self.cursor) {
+                    let email_id = email.id.clone();
+                    let old_seen = email.keywords.contains_key("$seen");
+                    let new_seen = !old_seen;
+                    let op_id = self.next_op_id();
+                    self.pending_write_ops.insert(
+                        op_id,
+                        PendingWriteOp::Seen {
+                            email_id: email_id.clone(),
+                            old_seen,
+                        },
+                    );
+                    self.set_email_seen_state(&email_id, new_seen);
+                    let send_result = if new_seen {
+                        self.cmd_tx.send(BackendCommand::MarkEmailRead {
+                            op_id,
+                            id: email_id.clone(),
+                        })
                     } else {
-                        email.keywords.insert("$seen".to_string(), true);
-                        let _ = self.cmd_tx.send(BackendCommand::MarkEmailRead {
-                            id: email.id.clone(),
-                        });
+                        self.cmd_tx.send(BackendCommand::MarkEmailUnread {
+                            op_id,
+                            id: email_id.clone(),
+                        })
+                    };
+                    if let Err(e) = send_result {
+                        self.record_send_failure(
+                            op_id,
+                            PendingWriteOp::Seen { email_id, old_seen },
+                            "Read state update",
+                            e.to_string(),
+                        );
                     }
                 }
                 ViewAction::Continue
@@ -512,20 +668,41 @@ impl View for EmailListView {
     fn take_pending_action(&mut self) -> Option<ViewAction> {
         if self.pending_click {
             self.pending_click = false;
-            if let Some(email) = self.emails.get_mut(self.cursor) {
+            if let Some(email) = self.emails.get(self.cursor) {
+                let email_id = email.id.clone();
+                let was_seen = email.keywords.contains_key("$seen");
                 let view = EmailView::new(
                     self.cmd_tx.clone(),
                     self.from_address.clone(),
-                    email.id.clone(),
+                    email_id.clone(),
                 );
                 let _ = self.cmd_tx.send(BackendCommand::GetEmail {
-                    id: email.id.clone(),
+                    id: email_id.clone(),
                 });
-                if !email.keywords.contains_key("$seen") {
-                    email.keywords.insert("$seen".to_string(), true);
-                    let _ = self.cmd_tx.send(BackendCommand::MarkEmailRead {
-                        id: email.id.clone(),
-                    });
+                if !was_seen {
+                    let op_id = self.next_op_id();
+                    self.pending_write_ops.insert(
+                        op_id,
+                        PendingWriteOp::Seen {
+                            email_id: email_id.clone(),
+                            old_seen: false,
+                        },
+                    );
+                    self.set_email_seen_state(&email_id, true);
+                    if let Err(e) = self.cmd_tx.send(BackendCommand::MarkEmailRead {
+                        op_id,
+                        id: email_id.clone(),
+                    }) {
+                        self.record_send_failure(
+                            op_id,
+                            PendingWriteOp::Seen {
+                                email_id,
+                                old_seen: false,
+                            },
+                            "Mark read",
+                            e.to_string(),
+                        );
+                    }
                 }
                 return Some(ViewAction::Push(Box::new(view)));
             }
@@ -546,6 +723,7 @@ impl View for EmailListView {
                     Ok(emails) => {
                         self.emails = emails.clone();
                         self.error = None;
+                        self.pending_write_ops.clear();
                         if self.cursor >= self.emails.len() && !self.emails.is_empty() {
                             self.cursor = self.emails.len() - 1;
                         }
@@ -555,6 +733,28 @@ impl View for EmailListView {
                     }
                 }
                 true
+            }
+            BackendResponse::EmailMutation {
+                op_id,
+                id: _,
+                action,
+                result,
+            } => {
+                if let Some(pending) = self.pending_write_ops.remove(op_id) {
+                    if let Err(e) = result {
+                        self.rollback_pending_write(pending);
+                        let action_label = match action {
+                            EmailMutationAction::MarkRead => "Mark read",
+                            EmailMutationAction::MarkUnread => "Mark unread",
+                            EmailMutationAction::SetFlagged(_) => "Flag update",
+                            EmailMutationAction::Move => "Move",
+                        };
+                        self.status_message = Some(format!("{} failed: {}", action_label, e));
+                    }
+                    true
+                } else {
+                    false
+                }
             }
             _ => false,
         }

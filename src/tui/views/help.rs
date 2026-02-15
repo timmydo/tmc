@@ -75,7 +75,13 @@ impl View for HelpView {
 
         let visible_rows = (term.rows as usize).saturating_sub(1);
 
-        for (i, line) in self.lines.iter().skip(self.scroll).enumerate().take(visible_rows) {
+        for (i, line) in self
+            .lines
+            .iter()
+            .skip(self.scroll)
+            .enumerate()
+            .take(visible_rows)
+        {
             let row = 1 + i as u16;
             term.move_to(row, 1)?;
 

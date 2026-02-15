@@ -1,14 +1,20 @@
-use crate::backend::BackendResponse;
+use crate::backend::{BackendResponse, EmailMutationAction};
 use crate::compose;
 use crate::jmap::types::Email;
 use crate::tui::input::Key;
 use crate::tui::screen::Terminal;
 use crate::tui::views::help::HelpView;
 use crate::tui::views::{View, ViewAction};
+use std::collections::HashMap;
 use std::io;
 use std::sync::mpsc;
 
 use crate::backend::BackendCommand;
+
+enum PendingWriteOp {
+    Flag { old_flagged: bool },
+    Seen { old_seen: bool },
+}
 
 pub struct EmailView {
     cmd_tx: mpsc::Sender<BackendCommand>,
@@ -21,6 +27,9 @@ pub struct EmailView {
     error: Option<String>,
     pending_reply_all: Option<bool>,
     pending_compose: Option<String>,
+    status_message: Option<String>,
+    next_write_op_id: u64,
+    pending_write_ops: HashMap<u64, PendingWriteOp>,
 }
 
 impl EmailView {
@@ -40,6 +49,9 @@ impl EmailView {
             error: None,
             pending_reply_all: None,
             pending_compose: None,
+            status_message: None,
+            next_write_op_id: 1,
+            pending_write_ops: HashMap::new(),
         }
     }
 
@@ -90,11 +102,7 @@ impl EmailView {
             }
         }
 
-        email
-            .preview
-            .as_deref()
-            .unwrap_or("(no body)")
-            .to_string()
+        email.preview.as_deref().unwrap_or("(no body)").to_string()
     }
 
     fn request_reply(&mut self, reply_all: bool) {
@@ -103,6 +111,39 @@ impl EmailView {
         let _ = self.cmd_tx.send(BackendCommand::GetEmailForReply {
             id: self.email_id.clone(),
         });
+    }
+
+    fn next_op_id(&mut self) -> u64 {
+        let id = self.next_write_op_id;
+        self.next_write_op_id = self.next_write_op_id.wrapping_add(1);
+        id
+    }
+
+    fn set_flagged(&mut self, flagged: bool) {
+        if let Some(ref mut email) = self.email {
+            if flagged {
+                email.keywords.insert("$flagged".to_string(), true);
+            } else {
+                email.keywords.remove("$flagged");
+            }
+        }
+    }
+
+    fn set_seen(&mut self, seen: bool) {
+        if let Some(ref mut email) = self.email {
+            if seen {
+                email.keywords.insert("$seen".to_string(), true);
+            } else {
+                email.keywords.remove("$seen");
+            }
+        }
+    }
+
+    fn rollback_pending_write(&mut self, op: PendingWriteOp) {
+        match op {
+            PendingWriteOp::Flag { old_flagged } => self.set_flagged(old_flagged),
+            PendingWriteOp::Seen { old_seen } => self.set_seen(old_seen),
+        }
     }
 }
 
@@ -144,14 +185,20 @@ impl View for EmailView {
 
         let visible_rows = (term.rows as usize).saturating_sub(1);
 
-        for (i, line) in self.lines.iter().skip(self.scroll).enumerate().take(visible_rows) {
+        for (i, line) in self
+            .lines
+            .iter()
+            .skip(self.scroll)
+            .enumerate()
+            .take(visible_rows)
+        {
             let row = 1 + i as u16;
             term.move_to(row, 1)?;
 
             // Bold headers (lines before the first empty line)
             let abs_idx = self.scroll + i;
-            let is_header = abs_idx < self.lines.len()
-                && self.lines[..abs_idx].iter().all(|l| !l.is_empty());
+            let is_header =
+                abs_idx < self.lines.len() && self.lines[..abs_idx].iter().all(|l| !l.is_empty());
 
             if is_header && !line.is_empty() {
                 term.set_bold()?;
@@ -166,7 +213,7 @@ impl View for EmailView {
         term.move_to(term.rows, 1)?;
         term.set_reverse()?;
         let total_lines = self.lines.len();
-        let status = if self.pending_reply_all.is_some() {
+        let base_status = if self.pending_reply_all.is_some() {
             format!(
                 " line {}/{} | Loading reply data... | q:back",
                 self.scroll + 1,
@@ -178,6 +225,11 @@ impl View for EmailView {
                 self.scroll + 1,
                 total_lines
             )
+        };
+        let status = if let Some(ref msg) = self.status_message {
+            format!("{} | {}", msg, base_status)
+        } else {
+            base_status
         };
         term.write_truncated(&status, term.cols)?;
         let remaining = (term.cols as usize).saturating_sub(status.len());
@@ -230,33 +282,48 @@ impl View for EmailView {
                 ViewAction::Continue
             }
             Key::Char('f') => {
-                if let Some(ref mut email) = self.email {
-                    let is_flagged = email.keywords.contains_key("$flagged");
-                    if is_flagged {
-                        email.keywords.remove("$flagged");
-                    } else {
-                        email.keywords.insert("$flagged".to_string(), true);
-                    }
-                    let _ = self.cmd_tx.send(BackendCommand::SetEmailFlagged {
+                if let Some(ref email) = self.email {
+                    let old_flagged = email.keywords.contains_key("$flagged");
+                    let new_flagged = !old_flagged;
+                    let op_id = self.next_op_id();
+                    self.pending_write_ops
+                        .insert(op_id, PendingWriteOp::Flag { old_flagged });
+                    self.set_flagged(new_flagged);
+                    if let Err(e) = self.cmd_tx.send(BackendCommand::SetEmailFlagged {
+                        op_id,
                         id: self.email_id.clone(),
-                        flagged: !is_flagged,
-                    });
+                        flagged: new_flagged,
+                    }) {
+                        self.pending_write_ops.remove(&op_id);
+                        self.set_flagged(old_flagged);
+                        self.status_message = Some(format!("Flag update failed: {}", e));
+                    }
                 }
                 ViewAction::Continue
             }
             Key::Char('u') => {
-                if let Some(ref mut email) = self.email {
-                    let is_read = email.keywords.contains_key("$seen");
-                    if is_read {
-                        email.keywords.remove("$seen");
-                        let _ = self.cmd_tx.send(BackendCommand::MarkEmailUnread {
+                if let Some(ref email) = self.email {
+                    let old_seen = email.keywords.contains_key("$seen");
+                    let new_seen = !old_seen;
+                    let op_id = self.next_op_id();
+                    self.pending_write_ops
+                        .insert(op_id, PendingWriteOp::Seen { old_seen });
+                    self.set_seen(new_seen);
+                    let send_result = if new_seen {
+                        self.cmd_tx.send(BackendCommand::MarkEmailRead {
+                            op_id,
                             id: self.email_id.clone(),
-                        });
+                        })
                     } else {
-                        email.keywords.insert("$seen".to_string(), true);
-                        let _ = self.cmd_tx.send(BackendCommand::MarkEmailRead {
+                        self.cmd_tx.send(BackendCommand::MarkEmailUnread {
+                            op_id,
                             id: self.email_id.clone(),
-                        });
+                        })
+                    };
+                    if let Err(e) = send_result {
+                        self.pending_write_ops.remove(&op_id);
+                        self.set_seen(old_seen);
+                        self.status_message = Some(format!("Read state update failed: {}", e));
                     }
                 }
                 ViewAction::Continue
@@ -291,6 +358,7 @@ impl View for EmailView {
                         self.lines = Self::render_email(email);
                         self.email = Some(email.clone());
                         self.error = None;
+                        self.pending_write_ops.clear();
                     }
                     Err(e) => {
                         self.error = Some(format!("Failed to load email: {}", e));
@@ -304,11 +372,8 @@ impl View for EmailView {
                     Ok(email) => {
                         self.email = Some(email.clone());
                         if let Some(reply_all) = reply_all {
-                            let draft = compose::build_reply_draft(
-                                email,
-                                reply_all,
-                                &self.from_address,
-                            );
+                            let draft =
+                                compose::build_reply_draft(email, reply_all, &self.from_address);
                             self.pending_compose = Some(draft);
                         }
                     }
@@ -318,13 +383,33 @@ impl View for EmailView {
                 }
                 true
             }
+            BackendResponse::EmailMutation {
+                op_id,
+                id,
+                action,
+                result,
+            } if *id == self.email_id => {
+                if let Some(pending) = self.pending_write_ops.remove(op_id) {
+                    if let Err(e) = result {
+                        self.rollback_pending_write(pending);
+                        let action_label = match action {
+                            EmailMutationAction::MarkRead => "Mark read",
+                            EmailMutationAction::MarkUnread => "Mark unread",
+                            EmailMutationAction::SetFlagged(_) => "Flag update",
+                            EmailMutationAction::Move => "Move",
+                        };
+                        self.status_message = Some(format!("{} failed: {}", action_label, e));
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
             _ => false,
         }
     }
 
     fn take_pending_action(&mut self) -> Option<ViewAction> {
-        self.pending_compose
-            .take()
-            .map(ViewAction::Compose)
+        self.pending_compose.take().map(ViewAction::Compose)
     }
 }

@@ -229,10 +229,7 @@ impl JmapClient {
     }
 
     pub fn get_mailboxes(&self) -> Result<Vec<Mailbox>, JmapError> {
-        log_info!(
-            "[JMAP] Fetching mailboxes for account: {}",
-            self.account_id
-        );
+        log_info!("[JMAP] Fetching mailboxes for account: {}", self.account_id);
 
         let request = JmapRequest {
             using: vec!["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
@@ -447,7 +444,9 @@ impl JmapClient {
             }
         }
 
-        Err(JmapError::Api("Unexpected response for Email/set".to_string()))
+        Err(JmapError::Api(
+            "Unexpected response for Email/set".to_string(),
+        ))
     }
 
     pub fn mark_email_unread(&self, id: &str) -> Result<(), JmapError> {
@@ -485,7 +484,9 @@ impl JmapClient {
             }
         }
 
-        Err(JmapError::Api("Unexpected response for Email/set".to_string()))
+        Err(JmapError::Api(
+            "Unexpected response for Email/set".to_string(),
+        ))
     }
 
     pub fn set_email_flagged(&self, id: &str, flagged: bool) -> Result<(), JmapError> {
@@ -527,7 +528,9 @@ impl JmapClient {
             }
         }
 
-        Err(JmapError::Api("Unexpected response for Email/set".to_string()))
+        Err(JmapError::Api(
+            "Unexpected response for Email/set".to_string(),
+        ))
     }
 
     pub fn move_email(&self, id: &str, to_mailbox_id: &str) -> Result<(), JmapError> {
@@ -569,7 +572,9 @@ impl JmapClient {
             }
         }
 
-        Err(JmapError::Api("Unexpected response for Email/set".to_string()))
+        Err(JmapError::Api(
+            "Unexpected response for Email/set".to_string(),
+        ))
     }
 
     pub fn get_email_raw(&self, id: &str) -> Result<Option<String>, JmapError> {

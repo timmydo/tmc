@@ -40,7 +40,7 @@
 - [x] Multi-account switching from mailbox list
 
 ## Phase 6: Next Phase (Recommended Priority Order)
-- [ ] P0: Add explicit write-failure UX for optimistic actions (flag/read/move)
+- [x] P0: Add explicit write-failure UX for optimistic actions (flag/read/move)
 - [ ] P1: Add true pagination/load-more for mailbox email lists
 - [ ] P1: Add periodic background sync (configurable interval)
 - [ ] P2: Add attachment list + open/download flow using JMAP `downloadUrl`

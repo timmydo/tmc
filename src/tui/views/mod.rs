@@ -52,17 +52,21 @@ impl ViewStack {
     }
 
     pub fn handle_key(&mut self, key: Key, term_rows: u16) -> Option<ViewAction> {
-        self.views.last_mut().map(|view| view.handle_key(key, term_rows))
+        self.views
+            .last_mut()
+            .map(|view| view.handle_key(key, term_rows))
     }
 
-    /// Route a backend response to the current view.
-    /// Returns true if a re-render is needed.
+    /// Route a backend response to all views (top-most can trigger re-render).
     pub fn handle_response(&mut self, response: &BackendResponse) -> bool {
-        if let Some(view) = self.views.last_mut() {
-            view.on_response(response)
-        } else {
-            false
+        let top = self.views.len().saturating_sub(1);
+        let mut needs_render = false;
+        for (idx, view) in self.views.iter_mut().enumerate() {
+            if view.on_response(response) && idx == top {
+                needs_render = true;
+            }
         }
+        needs_render
     }
 
     pub fn current_mut(&mut self) -> Option<&mut Box<dyn View>> {

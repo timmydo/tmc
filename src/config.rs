@@ -71,9 +71,7 @@ impl Config {
                 current_section = line[1..line.len() - 1].to_string();
                 // Pre-create account entry when we see [account.NAME]
                 if let Some(name) = current_section.strip_prefix("account.") {
-                    if !name.is_empty()
-                        && !accounts.iter().any(|(n, _, _, _)| n == name)
-                    {
+                    if !name.is_empty() && !accounts.iter().any(|(n, _, _, _)| n == name) {
                         accounts.push((name.to_string(), None, None, None));
                     }
                 }
@@ -140,7 +138,9 @@ impl Config {
         // Legacy [jmap] fallback
         if final_accounts.is_empty() {
             let well_known_url = jmap_well_known_url.ok_or_else(|| {
-                ConfigError::Parse("missing well_known_url (in [jmap] or [account.NAME])".to_string())
+                ConfigError::Parse(
+                    "missing well_known_url (in [jmap] or [account.NAME])".to_string(),
+                )
             })?;
             let username = jmap_username.ok_or_else(|| {
                 ConfigError::Parse("missing username (in [jmap] or [account.NAME])".to_string())
@@ -160,7 +160,11 @@ impl Config {
 
         Ok(Config {
             accounts: final_accounts,
-            ui: UiConfig { editor, page_size, mouse },
+            ui: UiConfig {
+                editor,
+                page_size,
+                mouse,
+            },
         })
     }
 }

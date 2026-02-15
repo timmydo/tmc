@@ -143,11 +143,7 @@ fn extract_body_text(email: &crate::jmap::types::Email) -> String {
             }
         }
     }
-    email
-        .preview
-        .as_deref()
-        .unwrap_or("(no body)")
-        .to_string()
+    email.preview.as_deref().unwrap_or("(no body)").to_string()
 }
 
 /// Write content to a temp file with restrictive permissions (0600).

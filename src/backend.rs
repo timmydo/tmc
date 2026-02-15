@@ -18,16 +18,20 @@ pub enum BackendCommand {
         id: String,
     },
     MarkEmailRead {
+        op_id: u64,
         id: String,
     },
     MarkEmailUnread {
+        op_id: u64,
         id: String,
     },
     SetEmailFlagged {
+        op_id: u64,
         id: String,
         flagged: bool,
     },
     MoveEmail {
+        op_id: u64,
         id: String,
         to_mailbox_id: String,
     },
@@ -50,6 +54,20 @@ pub enum BackendResponse {
         id: String,
         result: Box<Result<Email, String>>,
     },
+    EmailMutation {
+        op_id: u64,
+        id: String,
+        action: EmailMutationAction,
+        result: Result<(), String>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EmailMutationAction {
+    MarkRead,
+    MarkUnread,
+    SetFlagged(bool),
+    Move,
 }
 
 /// Spawn the backend thread. Returns the command sender and response receiver.
@@ -77,9 +95,7 @@ fn backend_loop(
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
             BackendCommand::FetchMailboxes => {
-                let result = client
-                    .get_mailboxes()
-                    .map_err(|e| e.to_string());
+                let result = client.get_mailboxes().map_err(|e| e.to_string());
                 let _ = resp_tx.send(BackendResponse::Mailboxes(result));
             }
             BackendCommand::QueryEmails {
@@ -115,9 +131,7 @@ fn backend_loop(
                 let result = client
                     .get_email(&id)
                     .map_err(|e| e.to_string())
-                    .and_then(|opt| {
-                        opt.ok_or_else(|| "Email not found".to_string())
-                    });
+                    .and_then(|opt| opt.ok_or_else(|| "Email not found".to_string()));
 
                 let _ = resp_tx.send(BackendResponse::EmailBody {
                     id,
@@ -128,34 +142,68 @@ fn backend_loop(
                 let result = client
                     .get_email_for_reply(&id)
                     .map_err(|e| e.to_string())
-                    .and_then(|opt| {
-                        opt.ok_or_else(|| "Email not found".to_string())
-                    });
+                    .and_then(|opt| opt.ok_or_else(|| "Email not found".to_string()));
 
                 let _ = resp_tx.send(BackendResponse::EmailForReply {
                     id,
                     result: Box::new(result),
                 });
             }
-            BackendCommand::MarkEmailRead { id } => {
-                if let Err(e) = client.mark_email_read(&id) {
-                    log_warn!("Failed to mark email {} as read: {}", id, e);
-                }
+            BackendCommand::MarkEmailRead { op_id, id } => {
+                let result = client.mark_email_read(&id).map_err(|e| {
+                    let msg = e.to_string();
+                    log_warn!("Failed to mark email {} as read: {}", id, msg);
+                    msg
+                });
+                let _ = resp_tx.send(BackendResponse::EmailMutation {
+                    op_id,
+                    id,
+                    action: EmailMutationAction::MarkRead,
+                    result,
+                });
             }
-            BackendCommand::MarkEmailUnread { id } => {
-                if let Err(e) = client.mark_email_unread(&id) {
-                    log_warn!("Failed to mark email {} as unread: {}", id, e);
-                }
+            BackendCommand::MarkEmailUnread { op_id, id } => {
+                let result = client.mark_email_unread(&id).map_err(|e| {
+                    let msg = e.to_string();
+                    log_warn!("Failed to mark email {} as unread: {}", id, msg);
+                    msg
+                });
+                let _ = resp_tx.send(BackendResponse::EmailMutation {
+                    op_id,
+                    id,
+                    action: EmailMutationAction::MarkUnread,
+                    result,
+                });
             }
-            BackendCommand::SetEmailFlagged { id, flagged } => {
-                if let Err(e) = client.set_email_flagged(&id, flagged) {
-                    log_warn!("Failed to set email {} flagged={}: {}", id, flagged, e);
-                }
+            BackendCommand::SetEmailFlagged { op_id, id, flagged } => {
+                let result = client.set_email_flagged(&id, flagged).map_err(|e| {
+                    let msg = e.to_string();
+                    log_warn!("Failed to set email {} flagged={}: {}", id, flagged, msg);
+                    msg
+                });
+                let _ = resp_tx.send(BackendResponse::EmailMutation {
+                    op_id,
+                    id,
+                    action: EmailMutationAction::SetFlagged(flagged),
+                    result,
+                });
             }
-            BackendCommand::MoveEmail { id, to_mailbox_id } => {
-                if let Err(e) = client.move_email(&id, &to_mailbox_id) {
-                    log_warn!("Failed to move email {}: {}", id, e);
-                }
+            BackendCommand::MoveEmail {
+                op_id,
+                id,
+                to_mailbox_id,
+            } => {
+                let result = client.move_email(&id, &to_mailbox_id).map_err(|e| {
+                    let msg = e.to_string();
+                    log_warn!("Failed to move email {}: {}", id, msg);
+                    msg
+                });
+                let _ = resp_tx.send(BackendResponse::EmailMutation {
+                    op_id,
+                    id,
+                    action: EmailMutationAction::Move,
+                    result,
+                });
             }
             BackendCommand::Shutdown => {
                 break;

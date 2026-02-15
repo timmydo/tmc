@@ -17,7 +17,10 @@ fn default_config_path() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         PathBuf::from(xdg).join("tmc").join("config.toml")
     } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".config").join("tmc").join("config.toml")
+        PathBuf::from(home)
+            .join(".config")
+            .join("tmc")
+            .join("config.toml")
     } else {
         PathBuf::from("config.toml")
     }
@@ -59,9 +62,7 @@ fn show_log() {
         std::process::exit(1);
     }
     let pager = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
-    let status = Command::new(&pager)
-        .arg(&path)
-        .status();
+    let status = Command::new(&pager).arg(&path).status();
     match status {
         Ok(s) if s.success() => {}
         Ok(s) => std::process::exit(s.code().unwrap_or(1)),
@@ -109,7 +110,10 @@ fn main() {
     let first_account = &config.accounts[0];
 
     // Connect to the first account
-    eprint!("Connecting to {} ({})...", first_account.name, first_account.well_known_url);
+    eprint!(
+        "Connecting to {} ({})...",
+        first_account.name, first_account.well_known_url
+    );
     io::stderr().flush().ok();
 
     let client = match connect_account(first_account) {
