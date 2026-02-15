@@ -9,6 +9,7 @@ use crate::jmap::client::JmapClient;
 use input::read_key;
 use screen::Terminal;
 use std::io;
+use std::time::{Duration, Instant};
 use views::mailbox_list::MailboxListView;
 use views::{ViewAction, ViewStack};
 
@@ -24,6 +25,7 @@ pub fn run(
     page_size: u32,
     editor: Option<String>,
     mouse: bool,
+    sync_interval_secs: Option<u64>,
 ) -> io::Result<()> {
     let (mut cmd_tx, mut resp_rx) = backend::spawn(client);
     let mut term = Terminal::new(mouse)?;
@@ -41,6 +43,8 @@ pub fn run(
     let _ = cmd_tx.send(BackendCommand::FetchMailboxes);
 
     let mut stack = ViewStack::new(Box::new(mailbox_view));
+    let sync_interval = sync_interval_secs.map(Duration::from_secs);
+    let mut last_periodic_sync = Instant::now();
 
     let editor_cmd = editor
         .or_else(|| std::env::var("EDITOR").ok())
@@ -50,6 +54,18 @@ pub fn run(
     stack.render_current(&mut term)?;
 
     loop {
+        if let Some(sync_interval) = sync_interval {
+            if last_periodic_sync.elapsed() >= sync_interval {
+                last_periodic_sync = Instant::now();
+                if let Some(view) = stack.current_mut() {
+                    if view.trigger_periodic_sync() {
+                        sync_mouse_for_view(&mut term, &stack)?;
+                        stack.render_current(&mut term)?;
+                    }
+                }
+            }
+        }
+
         if term.check_resize() {
             sync_mouse_for_view(&mut term, &stack)?;
             stack.render_current(&mut term)?;
@@ -147,6 +163,7 @@ pub fn run(
                                 );
                                 let _ = cmd_tx.send(BackendCommand::FetchMailboxes);
                                 stack = ViewStack::new(Box::new(mailbox_view));
+                                last_periodic_sync = Instant::now();
                             }
                             Err(e) => {
                                 crate::log_error!("Failed to connect to account {}: {}", name, e);

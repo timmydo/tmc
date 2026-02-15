@@ -35,6 +35,7 @@ Supported config styles:
 editor = "nvim"
 page_size = 100
 mouse = true
+sync_interval_secs = 60
 
 [account.personal]
 well_known_url = "https://mx.example.com/.well-known/jmap"
@@ -101,8 +102,6 @@ Credentials are fetched by running `password_command`; there is no interactive p
 
 ## Current Gaps (as of code in this repo)
 
-- No periodic background sync.
-- No paginated fetch beyond initial `page_size` window (query position is fixed at `0`).
 - No attachment UI/download workflow despite `downloadUrl` discovery.
 - No thread/conversation UI.
 - Some UI actions are optimistic and do not show explicit failure state on backend errors.

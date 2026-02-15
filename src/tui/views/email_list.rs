@@ -841,4 +841,12 @@ impl View for EmailListView {
             _ => false,
         }
     }
+
+    fn trigger_periodic_sync(&mut self) -> bool {
+        if self.loading || self.move_mode || self.search_mode {
+            return false;
+        }
+        self.request_refresh();
+        true
+    }
 }

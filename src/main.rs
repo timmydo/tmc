@@ -136,6 +136,7 @@ fn main() {
         config.ui.page_size,
         config.ui.editor,
         config.ui.mouse,
+        config.ui.sync_interval_secs,
     ) {
         eprintln!("TUI error: {}", e);
         std::process::exit(1);

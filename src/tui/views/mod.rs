@@ -31,6 +31,11 @@ pub trait View {
     fn take_pending_action(&mut self) -> Option<ViewAction> {
         None
     }
+    /// Trigger periodic background sync for the active view.
+    /// Returns true if this changed view state and should re-render.
+    fn trigger_periodic_sync(&mut self) -> bool {
+        false
+    }
 }
 
 pub struct ViewStack {

@@ -345,4 +345,12 @@ impl View for MailboxListView {
             _ => false,
         }
     }
+
+    fn trigger_periodic_sync(&mut self) -> bool {
+        if self.loading {
+            return false;
+        }
+        self.request_refresh();
+        true
+    }
 }

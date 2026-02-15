@@ -20,6 +20,7 @@ pub struct UiConfig {
     pub editor: Option<String>,
     pub page_size: u32,
     pub mouse: bool,
+    pub sync_interval_secs: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -47,6 +48,7 @@ impl Config {
         let mut editor = None;
         let mut page_size = 500u32;
         let mut mouse = true;
+        let mut sync_interval_secs = Some(60u64);
 
         // Legacy [jmap] fields
         let mut jmap_well_known_url = None;
@@ -91,6 +93,13 @@ impl Config {
                         "editor" => editor = Some(value.to_string()),
                         "page_size" => page_size = value.parse().unwrap_or(500),
                         "mouse" => mouse = value != "false",
+                        "sync_interval_secs" => {
+                            sync_interval_secs =
+                                value.parse::<u64>().ok().and_then(|secs| match secs {
+                                    0 => None,
+                                    _ => Some(secs),
+                                })
+                        }
                         _ => {}
                     }
                 } else if current_section == "jmap" {
@@ -164,6 +173,7 @@ impl Config {
                 editor,
                 page_size,
                 mouse,
+                sync_interval_secs,
             },
         })
     }
@@ -199,6 +209,7 @@ page_size = 25
         );
         assert_eq!(config.ui.page_size, 25);
         assert!(config.ui.editor.is_none());
+        assert_eq!(config.ui.sync_interval_secs, Some(60));
     }
 
     #[test]
@@ -226,6 +237,7 @@ password_command = "pass show email/work.com"
         assert_eq!(config.accounts[1].username, "user@work.com");
         assert_eq!(config.ui.page_size, 100);
         assert_eq!(config.ui.editor.as_deref(), Some("nvim"));
+        assert_eq!(config.ui.sync_interval_secs, Some(60));
     }
 
     #[test]
@@ -238,6 +250,7 @@ password_command = "pass show email"
 "#;
         let config = Config::parse(toml).unwrap();
         assert_eq!(config.ui.page_size, 500);
+        assert_eq!(config.ui.sync_interval_secs, Some(60));
     }
 
     #[test]
@@ -250,6 +263,7 @@ password_command = "pass show email"
 "#;
         let config = Config::parse(toml).unwrap();
         assert!(config.ui.mouse); // default is true
+        assert_eq!(config.ui.sync_interval_secs, Some(60));
 
         let toml_disabled = r#"
 [ui]
@@ -274,6 +288,33 @@ password_command = "pass show email"
 "#;
         let config = Config::parse(toml_enabled).unwrap();
         assert!(config.ui.mouse);
+    }
+
+    #[test]
+    fn test_sync_interval_config() {
+        let toml = r#"
+[ui]
+sync_interval_secs = 180
+
+[jmap]
+well_known_url = "https://mx.example.com/.well-known/jmap"
+username = "user@example.com"
+password_command = "pass show email"
+"#;
+        let config = Config::parse(toml).unwrap();
+        assert_eq!(config.ui.sync_interval_secs, Some(180));
+
+        let toml_disabled = r#"
+[ui]
+sync_interval_secs = 0
+
+[jmap]
+well_known_url = "https://mx.example.com/.well-known/jmap"
+username = "user@example.com"
+password_command = "pass show email"
+"#;
+        let config = Config::parse(toml_disabled).unwrap();
+        assert_eq!(config.ui.sync_interval_secs, None);
     }
 
     #[test]

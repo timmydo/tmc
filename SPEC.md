@@ -103,6 +103,7 @@ Supported shape:
 editor = "nvim"
 page_size = 100
 mouse = true
+sync_interval_secs = 60
 
 [account.personal]
 well_known_url = "https://mx.example.com/.well-known/jmap"
@@ -121,8 +122,6 @@ password_command = "pass show email/example.com"
 
 ## Known Gaps
 
-- No periodic sync timer.
-- No true pagination/infinite scrolling; query always starts at position 0.
 - No thread/conversation grouping.
 - No attachment list/download workflow.
 - Optimistic UI updates do not currently surface backend write failures to users.
