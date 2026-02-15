@@ -97,6 +97,7 @@ Credentials are fetched by running `password_command`; there is no interactive p
 ## Commit Policy
 
 - Agent-created commits must include a `Co-Authored-By:` trailer.
+- Run `cargo fmt` and wait for it to complete before committing changes.
 
 ## Current Gaps (as of code in this repo)
 

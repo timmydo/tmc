@@ -9,6 +9,7 @@ pub enum BackendCommand {
     QueryEmails {
         mailbox_id: String,
         page_size: u32,
+        position: u32,
         search_query: Option<String>,
     },
     GetEmail {
@@ -45,6 +46,8 @@ pub enum BackendResponse {
         mailbox_id: String,
         emails: Result<Vec<Email>, String>,
         total: Option<u32>,
+        position: u32,
+        loaded: u32,
     },
     EmailBody {
         id: String,
@@ -101,30 +104,35 @@ fn backend_loop(
             BackendCommand::QueryEmails {
                 mailbox_id,
                 page_size,
+                position,
                 search_query,
             } => {
                 let result = (|| {
                     let query = client
-                        .query_emails(&mailbox_id, page_size, 0, search_query.as_deref())
+                        .query_emails(&mailbox_id, page_size, position, search_query.as_deref())
                         .map_err(|e| e.to_string())?;
                     let total = query.total;
+                    let position = query.position;
+                    let loaded = query.ids.len() as u32;
                     let emails = if query.ids.is_empty() {
                         Ok(Vec::new())
                     } else {
                         client.get_emails(&query.ids).map_err(|e| e.to_string())
                     }?;
-                    Ok((emails, total))
+                    Ok((emails, total, position, loaded))
                 })();
 
-                let (emails, total) = match result {
-                    Ok((emails, total)) => (Ok(emails), total),
-                    Err(e) => (Err(e), None),
+                let (emails, total, position, loaded) = match result {
+                    Ok((emails, total, position, loaded)) => (Ok(emails), total, position, loaded),
+                    Err(e) => (Err(e), None, position, 0),
                 };
 
                 let _ = resp_tx.send(BackendResponse::Emails {
                     mailbox_id,
                     emails,
                     total,
+                    position,
+                    loaded,
                 });
             }
             BackendCommand::GetEmail { id } => {

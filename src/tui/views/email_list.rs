@@ -6,7 +6,7 @@ use crate::tui::screen::Terminal;
 use crate::tui::views::email_view::EmailView;
 use crate::tui::views::help::HelpView;
 use crate::tui::views::{View, ViewAction};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::mpsc;
 
@@ -34,7 +34,10 @@ pub struct EmailListView {
     emails: Vec<Email>,
     cursor: usize,
     total: Option<u32>,
+    next_query_position: u32,
+    last_loaded_count: u32,
     loading: bool,
+    loading_more: bool,
     error: Option<String>,
     pending_click: bool,
     mailboxes: Vec<Mailbox>,
@@ -66,7 +69,10 @@ impl EmailListView {
             emails: Vec::new(),
             cursor: 0,
             total: None,
+            next_query_position: 0,
+            last_loaded_count: 0,
             loading: true,
+            loading_more: false,
             error: None,
             pending_click: false,
             mailboxes,
@@ -82,12 +88,51 @@ impl EmailListView {
     }
 
     fn request_refresh(&mut self) {
+        self.next_query_position = 0;
+        self.last_loaded_count = 0;
         self.loading = true;
+        self.loading_more = false;
         let _ = self.cmd_tx.send(BackendCommand::QueryEmails {
             mailbox_id: self.mailbox_id.clone(),
             page_size: self.page_size,
+            position: 0,
             search_query: self.active_search.clone(),
         });
+    }
+
+    fn can_load_more(&self) -> bool {
+        if self.loading || self.emails.is_empty() {
+            return false;
+        }
+
+        if let Some(total) = self.total {
+            (self.emails.len() as u32) < total
+        } else {
+            self.last_loaded_count >= self.page_size
+        }
+    }
+
+    fn request_load_more(&mut self) -> bool {
+        if !self.can_load_more() {
+            return false;
+        }
+
+        self.loading = true;
+        self.loading_more = true;
+        match self.cmd_tx.send(BackendCommand::QueryEmails {
+            mailbox_id: self.mailbox_id.clone(),
+            page_size: self.page_size,
+            position: self.next_query_position,
+            search_query: self.active_search.clone(),
+        }) {
+            Ok(()) => true,
+            Err(e) => {
+                self.loading = false;
+                self.loading_more = false;
+                self.status_message = Some(format!("Load more failed: {}", e));
+                false
+            }
+        }
     }
 
     fn is_unread(email: &Email) -> bool {
@@ -325,7 +370,11 @@ impl View for EmailListView {
                 self.mailboxes.len()
             )
         } else if self.loading {
-            " Loading... | q:back".to_string()
+            if self.loading_more {
+                " Loading more... | q:back".to_string()
+            } else {
+                " Loading... | q:back".to_string()
+            }
         } else if self.emails.is_empty() {
             " q:back g:refresh s:search".to_string()
         } else {
@@ -334,11 +383,13 @@ impl View for EmailListView {
             } else {
                 ""
             };
+            let load_more_hint = if self.can_load_more() { " l:more" } else { "" };
             format!(
-                " {}/{} | q:back n/p:nav RET:read g:refresh f:flag u:unread m:move s:search{}",
+                " {}/{} | q:back n/p:nav RET:read g:refresh f:flag u:unread m:move s:search{}{}",
                 self.cursor + 1,
                 self.emails.len(),
-                search_hint
+                search_hint,
+                load_more_hint
             )
         };
         let status = if let Some(ref msg) = self.status_message {
@@ -465,6 +516,8 @@ impl View for EmailListView {
             Key::Char('n') | Key::Char('j') | Key::Down => {
                 if !self.emails.is_empty() && self.cursor + 1 < self.emails.len() {
                     self.cursor += 1;
+                } else {
+                    self.request_load_more();
                 }
                 ViewAction::Continue
             }
@@ -477,6 +530,9 @@ impl View for EmailListView {
             Key::PageDown => {
                 if !self.emails.is_empty() {
                     self.cursor = (self.cursor + page).min(self.emails.len() - 1);
+                    if self.cursor + 1 >= self.emails.len() {
+                        self.request_load_more();
+                    }
                 }
                 ViewAction::Continue
             }
@@ -491,6 +547,7 @@ impl View for EmailListView {
             Key::End => {
                 if !self.emails.is_empty() {
                     self.cursor = self.emails.len() - 1;
+                    self.request_load_more();
                 }
                 ViewAction::Continue
             }
@@ -620,6 +677,10 @@ impl View for EmailListView {
                 self.search_input.clear();
                 ViewAction::Continue
             }
+            Key::Char('l') => {
+                self.request_load_more();
+                ViewAction::Continue
+            }
             Key::Escape => {
                 if self.active_search.is_some() {
                     self.active_search = None;
@@ -641,6 +702,8 @@ impl View for EmailListView {
             Key::ScrollDown => {
                 if !self.emails.is_empty() && self.cursor + 1 < self.emails.len() {
                     self.cursor += 1;
+                } else {
+                    self.request_load_more();
                 }
                 ViewAction::Continue
             }
@@ -716,20 +779,39 @@ impl View for EmailListView {
                 mailbox_id,
                 emails,
                 total,
+                position,
+                loaded,
             } if *mailbox_id == self.mailbox_id => {
                 self.loading = false;
+                self.loading_more = false;
                 self.total = *total;
+                self.last_loaded_count = *loaded;
+                self.next_query_position = position.saturating_add(*loaded);
                 match emails {
                     Ok(emails) => {
-                        self.emails = emails.clone();
+                        if *position == 0 {
+                            self.emails = emails.clone();
+                            self.pending_write_ops.clear();
+                        } else {
+                            let mut existing_ids: HashSet<String> =
+                                self.emails.iter().map(|e| e.id.clone()).collect();
+                            for email in emails {
+                                if existing_ids.insert(email.id.clone()) {
+                                    self.emails.push(email.clone());
+                                }
+                            }
+                        }
                         self.error = None;
-                        self.pending_write_ops.clear();
                         if self.cursor >= self.emails.len() && !self.emails.is_empty() {
                             self.cursor = self.emails.len() - 1;
                         }
                     }
                     Err(e) => {
-                        self.error = Some(format!("Failed to fetch emails: {}", e));
+                        if *position == 0 {
+                            self.error = Some(format!("Failed to fetch emails: {}", e));
+                        } else {
+                            self.status_message = Some(format!("Load more failed: {}", e));
+                        }
                     }
                 }
                 true

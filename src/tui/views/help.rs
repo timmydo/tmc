@@ -43,6 +43,7 @@ impl HelpView {
             "  u           Toggle read/unread".to_string(),
             "  m           Move to folder".to_string(),
             "  s           Search in mailbox".to_string(),
+            "  l           Load more messages".to_string(),
             "  Escape      Clear search".to_string(),
             "  PgDn        Page down".to_string(),
             "  PgUp        Page up".to_string(),

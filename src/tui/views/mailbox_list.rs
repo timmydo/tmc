@@ -241,6 +241,7 @@ impl View for MailboxListView {
                     let _ = self.cmd_tx.send(BackendCommand::QueryEmails {
                         mailbox_id: mailbox.id.clone(),
                         page_size: self.page_size,
+                        position: 0,
                         search_query: None,
                     });
                     ViewAction::Push(Box::new(view))
@@ -312,6 +313,7 @@ impl View for MailboxListView {
                 let _ = self.cmd_tx.send(BackendCommand::QueryEmails {
                     mailbox_id: mailbox.id.clone(),
                     page_size: self.page_size,
+                    position: 0,
                     search_query: None,
                 });
                 return Some(ViewAction::Push(Box::new(view)));
