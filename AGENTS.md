@@ -96,7 +96,7 @@ Credentials are fetched by running `password_command`; there is no interactive p
 
 ## Commit Policy
 
-- Agent-created commits must include a `Co-Authored-By: Codex <codex@openai.com>` trailer.
+- Agent-created commits must include a `Co-Authored-By:` trailer.
 
 ## Current Gaps (as of code in this repo)
 
