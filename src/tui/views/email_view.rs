@@ -225,6 +225,38 @@ impl View for EmailView {
                 self.request_reply(true);
                 ViewAction::Continue
             }
+            Key::Char('f') => {
+                if let Some(ref mut email) = self.email {
+                    let is_flagged = email.keywords.contains_key("$flagged");
+                    if is_flagged {
+                        email.keywords.remove("$flagged");
+                    } else {
+                        email.keywords.insert("$flagged".to_string(), true);
+                    }
+                    let _ = self.cmd_tx.send(BackendCommand::SetEmailFlagged {
+                        id: self.email_id.clone(),
+                        flagged: !is_flagged,
+                    });
+                }
+                ViewAction::Continue
+            }
+            Key::Char('u') => {
+                if let Some(ref mut email) = self.email {
+                    let is_read = email.keywords.contains_key("$seen");
+                    if is_read {
+                        email.keywords.remove("$seen");
+                        let _ = self.cmd_tx.send(BackendCommand::MarkEmailUnread {
+                            id: self.email_id.clone(),
+                        });
+                    } else {
+                        email.keywords.insert("$seen".to_string(), true);
+                        let _ = self.cmd_tx.send(BackendCommand::MarkEmailRead {
+                            id: self.email_id.clone(),
+                        });
+                    }
+                }
+                ViewAction::Continue
+            }
             Key::Char('c') => {
                 let draft = compose::build_compose_draft(&self.from_address);
                 ViewAction::Compose(draft)

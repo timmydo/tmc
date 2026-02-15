@@ -1,6 +1,6 @@
 use crate::backend::{BackendCommand, BackendResponse};
 use crate::compose;
-use crate::jmap::types::Email;
+use crate::jmap::types::{Email, Mailbox};
 use crate::tui::input::Key;
 use crate::tui::screen::Terminal;
 use crate::tui::views::email_view::EmailView;
@@ -21,6 +21,12 @@ pub struct EmailListView {
     loading: bool,
     error: Option<String>,
     pending_click: bool,
+    mailboxes: Vec<Mailbox>,
+    move_mode: bool,
+    move_cursor: usize,
+    search_mode: bool,
+    search_input: String,
+    active_search: Option<String>,
 }
 
 impl EmailListView {
@@ -30,6 +36,7 @@ impl EmailListView {
         mailbox_id: String,
         mailbox_name: String,
         page_size: u32,
+        mailboxes: Vec<Mailbox>,
     ) -> Self {
         EmailListView {
             cmd_tx,
@@ -43,6 +50,12 @@ impl EmailListView {
             loading: true,
             error: None,
             pending_click: false,
+            mailboxes,
+            move_mode: false,
+            move_cursor: 0,
+            search_mode: false,
+            search_input: String::new(),
+            active_search: None,
         }
     }
 
@@ -51,6 +64,7 @@ impl EmailListView {
         let _ = self.cmd_tx.send(BackendCommand::QueryEmails {
             mailbox_id: self.mailbox_id.clone(),
             page_size: self.page_size,
+            search_query: self.active_search.clone(),
         });
     }
 
@@ -58,8 +72,13 @@ impl EmailListView {
         !email.keywords.contains_key("$seen")
     }
 
+    fn is_flagged(email: &Email) -> bool {
+        email.keywords.contains_key("$flagged")
+    }
+
     fn format_email(email: &Email, width: u16) -> String {
         let unread = if Self::is_unread(email) { "N" } else { " " };
+        let flagged = if Self::is_flagged(email) { "F" } else { " " };
 
         let from = email
             .from
@@ -87,15 +106,16 @@ impl EmailListView {
             .unwrap_or("");
 
         let w = width as usize;
-        let from_width = 20.min(w.saturating_sub(18));
-        let subj_width = w.saturating_sub(18 + from_width);
+        let from_width = 20.min(w.saturating_sub(19));
+        let subj_width = w.saturating_sub(19 + from_width);
 
         let from_display = truncate(from, from_width);
         let subj_display = truncate(subject, subj_width);
 
         format!(
-            " {} {} {:from_w$} {}",
+            " {}{} {} {:from_w$} {}",
             unread,
+            flagged,
             date,
             from_display,
             subj_display,
@@ -125,9 +145,16 @@ impl View for EmailListView {
         // Header
         term.move_to(1, 1)?;
         term.set_bold()?;
-        let header = match self.total {
-            Some(total) => format!("{} ({} messages)", self.mailbox_name, total),
-            None => self.mailbox_name.clone(),
+        let header = if let Some(ref query) = self.active_search {
+            match self.total {
+                Some(total) => format!("{} [search: {}] ({} results)", self.mailbox_name, query, total),
+                None => format!("{} [search: {}]", self.mailbox_name, query),
+            }
+        } else {
+            match self.total {
+                Some(total) => format!("{} ({} messages)", self.mailbox_name, total),
+                None => self.mailbox_name.clone(),
+            }
         };
         term.write_truncated(&header, term.cols)?;
         term.reset_attr()?;
@@ -137,7 +164,41 @@ impl View for EmailListView {
         let sep = "-".repeat(term.cols as usize);
         term.write_str(&sep)?;
 
-        if self.loading && self.emails.is_empty() {
+        if self.move_mode {
+            // Render mailbox picker
+            term.move_to(3, 1)?;
+            term.set_bold()?;
+            term.write_truncated("Move to mailbox:", term.cols)?;
+            term.reset_attr()?;
+
+            let max_items = (term.rows as usize).saturating_sub(5);
+            let scroll_offset = if self.move_cursor >= max_items {
+                self.move_cursor - max_items + 1
+            } else {
+                0
+            };
+
+            for (i, mailbox) in self
+                .mailboxes
+                .iter()
+                .skip(scroll_offset)
+                .enumerate()
+                .take(max_items)
+            {
+                let row = 4 + i as u16;
+                term.move_to(row, 1)?;
+
+                let display_idx = scroll_offset + i;
+                let line = format!("  {}", mailbox.name);
+
+                if display_idx == self.move_cursor {
+                    term.set_reverse()?;
+                }
+
+                term.write_truncated(&line, term.cols)?;
+                term.reset_attr()?;
+            }
+        } else if self.loading && self.emails.is_empty() {
             term.move_to(3, 1)?;
             term.write_truncated("Loading emails...", term.cols)?;
         } else if let Some(ref err) = self.error {
@@ -184,15 +245,29 @@ impl View for EmailListView {
         // Status bar
         term.move_to(term.rows, 1)?;
         term.set_reverse()?;
-        let status = if self.loading {
+        let status = if self.search_mode {
+            format!(" Search: {}_", self.search_input)
+        } else if self.move_mode {
+            format!(
+                " {}/{} | n/p:navigate RET:move Esc:cancel",
+                self.move_cursor + 1,
+                self.mailboxes.len()
+            )
+        } else if self.loading {
             " Loading... | q:back".to_string()
         } else if self.emails.is_empty() {
-            " q:back g:refresh".to_string()
+            " q:back g:refresh s:search".to_string()
         } else {
+            let search_hint = if self.active_search.is_some() {
+                " Esc:clear-search"
+            } else {
+                ""
+            };
             format!(
-                " {}/{} | q:back n/p:navigate RET:read g:refresh",
+                " {}/{} | q:back n/p:nav RET:read g:refresh f:flag u:unread m:move s:search{}",
                 self.cursor + 1,
-                self.emails.len()
+                self.emails.len(),
+                search_hint
             )
         };
         term.write_truncated(&status, term.cols)?;
@@ -206,6 +281,85 @@ impl View for EmailListView {
     }
 
     fn handle_key(&mut self, key: Key, term_rows: u16) -> ViewAction {
+        // Search mode: capture text input
+        if self.search_mode {
+            match key {
+                Key::Enter => {
+                    self.search_mode = false;
+                    if self.search_input.is_empty() {
+                        // Empty search clears active search
+                        self.active_search = None;
+                    } else {
+                        self.active_search = Some(self.search_input.clone());
+                    }
+                    self.search_input.clear();
+                    self.request_refresh();
+                }
+                Key::Escape => {
+                    self.search_mode = false;
+                    self.search_input.clear();
+                }
+                Key::Backspace => {
+                    self.search_input.pop();
+                }
+                Key::Char(c) => {
+                    self.search_input.push(c);
+                }
+                _ => {}
+            }
+            return ViewAction::Continue;
+        }
+
+        // Move mode: mailbox picker
+        if self.move_mode {
+            match key {
+                Key::Escape | Key::Char('q') => {
+                    self.move_mode = false;
+                }
+                Key::Char('n') | Key::Char('j') | Key::Down => {
+                    if !self.mailboxes.is_empty() && self.move_cursor + 1 < self.mailboxes.len() {
+                        self.move_cursor += 1;
+                    }
+                }
+                Key::Char('p') | Key::Char('k') | Key::Up => {
+                    if self.move_cursor > 0 {
+                        self.move_cursor -= 1;
+                    }
+                }
+                Key::Enter => {
+                    if let Some(target) = self.mailboxes.get(self.move_cursor) {
+                        if let Some(email) = self.emails.get(self.cursor) {
+                            let _ = self.cmd_tx.send(BackendCommand::MoveEmail {
+                                id: email.id.clone(),
+                                to_mailbox_id: target.id.clone(),
+                            });
+                            self.emails.remove(self.cursor);
+                            if self.cursor >= self.emails.len() && self.cursor > 0 {
+                                self.cursor -= 1;
+                            }
+                            if let Some(ref mut total) = self.total {
+                                *total = total.saturating_sub(1);
+                            }
+                        }
+                        self.move_mode = false;
+                    }
+                }
+                Key::ScrollUp => {
+                    if self.move_cursor > 0 {
+                        self.move_cursor -= 1;
+                    }
+                }
+                Key::ScrollDown => {
+                    if !self.mailboxes.is_empty() && self.move_cursor + 1 < self.mailboxes.len() {
+                        self.move_cursor += 1;
+                    }
+                }
+                _ => {}
+            }
+            return ViewAction::Continue;
+        }
+
+        // Normal mode
         let page = (term_rows as usize).saturating_sub(4);
         match key {
             Key::Char('q') => ViewAction::Pop,
@@ -264,6 +418,57 @@ impl View for EmailListView {
             }
             Key::Char('g') => {
                 self.request_refresh();
+                ViewAction::Continue
+            }
+            Key::Char('f') => {
+                if let Some(email) = self.emails.get_mut(self.cursor) {
+                    let is_flagged = email.keywords.contains_key("$flagged");
+                    if is_flagged {
+                        email.keywords.remove("$flagged");
+                    } else {
+                        email.keywords.insert("$flagged".to_string(), true);
+                    }
+                    let _ = self.cmd_tx.send(BackendCommand::SetEmailFlagged {
+                        id: email.id.clone(),
+                        flagged: !is_flagged,
+                    });
+                }
+                ViewAction::Continue
+            }
+            Key::Char('u') => {
+                if let Some(email) = self.emails.get_mut(self.cursor) {
+                    let is_read = email.keywords.contains_key("$seen");
+                    if is_read {
+                        email.keywords.remove("$seen");
+                        let _ = self.cmd_tx.send(BackendCommand::MarkEmailUnread {
+                            id: email.id.clone(),
+                        });
+                    } else {
+                        email.keywords.insert("$seen".to_string(), true);
+                        let _ = self.cmd_tx.send(BackendCommand::MarkEmailRead {
+                            id: email.id.clone(),
+                        });
+                    }
+                }
+                ViewAction::Continue
+            }
+            Key::Char('m') => {
+                if !self.emails.is_empty() && !self.mailboxes.is_empty() {
+                    self.move_mode = true;
+                    self.move_cursor = 0;
+                }
+                ViewAction::Continue
+            }
+            Key::Char('s') => {
+                self.search_mode = true;
+                self.search_input.clear();
+                ViewAction::Continue
+            }
+            Key::Escape => {
+                if self.active_search.is_some() {
+                    self.active_search = None;
+                    self.request_refresh();
+                }
                 ViewAction::Continue
             }
             Key::Char('c') => {

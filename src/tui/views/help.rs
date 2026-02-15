@@ -39,6 +39,11 @@ impl HelpView {
             "  p/k/Up      Previous email".to_string(),
             "  Enter       Open email".to_string(),
             "  g           Refresh".to_string(),
+            "  f           Toggle flagged".to_string(),
+            "  u           Toggle read/unread".to_string(),
+            "  m           Move to folder".to_string(),
+            "  s           Search in mailbox".to_string(),
+            "  Escape      Clear search".to_string(),
             "  PgDn        Page down".to_string(),
             "  PgUp        Page up".to_string(),
             "  Home        Jump to top".to_string(),
@@ -55,6 +60,8 @@ impl HelpView {
             "  End         Jump to bottom".to_string(),
             "  r           Reply".to_string(),
             "  R           Reply all".to_string(),
+            "  f           Toggle flagged".to_string(),
+            "  u           Toggle read/unread".to_string(),
             String::new(),
         ];
 

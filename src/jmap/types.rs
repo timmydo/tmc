@@ -144,6 +144,8 @@ pub struct Email {
     #[serde(default)]
     pub keywords: HashMap<String, bool>,
     #[serde(default)]
+    pub mailbox_ids: HashMap<String, bool>,
+    #[serde(default)]
     pub message_id: Option<Vec<String>>,
     #[serde(default)]
     pub references: Option<Vec<String>>,

@@ -269,13 +269,27 @@ impl JmapClient {
         mailbox_id: &str,
         limit: u32,
         position: u32,
+        search_text: Option<&str>,
     ) -> Result<EmailQueryResult, JmapError> {
         log_info!(
-            "[JMAP] Email/query for mailbox: {} (limit: {}, position: {})",
+            "[JMAP] Email/query for mailbox: {} (limit: {}, position: {}, search: {:?})",
             mailbox_id,
             limit,
-            position
+            position,
+            search_text
         );
+
+        let filter = if let Some(text) = search_text {
+            json!({
+                "operator": "AND",
+                "conditions": [
+                    { "inMailbox": mailbox_id },
+                    { "text": text }
+                ]
+            })
+        } else {
+            json!({ "inMailbox": mailbox_id })
+        };
 
         let request = JmapRequest {
             using: vec!["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
@@ -283,7 +297,7 @@ impl JmapClient {
                 "Email/query",
                 json!({
                     "accountId": self.account_id,
-                    "filter": { "inMailbox": mailbox_id },
+                    "filter": filter,
                     "sort": [{ "property": "receivedAt", "isAscending": false }],
                     "limit": limit,
                     "position": position
@@ -331,7 +345,8 @@ impl JmapClient {
                     "ids": ids,
                     "properties": [
                         "id", "from", "to", "cc", "subject",
-                        "receivedAt", "preview", "textBody", "bodyValues", "keywords"
+                        "receivedAt", "preview", "textBody", "bodyValues", "keywords",
+                        "mailboxIds"
                     ],
                     "fetchTextBodyValues": true
                 }),
@@ -424,6 +439,128 @@ impl JmapClient {
                     if not_updated.get(id).is_some() {
                         return Err(JmapError::Api(format!(
                             "Failed to mark email as read: {:?}",
+                            not_updated
+                        )));
+                    }
+                }
+                return Ok(());
+            }
+        }
+
+        Err(JmapError::Api("Unexpected response for Email/set".to_string()))
+    }
+
+    pub fn mark_email_unread(&self, id: &str) -> Result<(), JmapError> {
+        log_info!("[JMAP] Email/set marking as unread: {}", id);
+
+        let request = JmapRequest {
+            using: vec!["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            method_calls: vec![MethodCall(
+                "Email/set",
+                json!({
+                    "accountId": self.account_id,
+                    "update": {
+                        id: {
+                            "keywords/$seen": null
+                        }
+                    }
+                }),
+                "0".to_string(),
+            )],
+        };
+
+        let response = self.call(request)?;
+
+        if let Some(method_response) = response.method_responses.first() {
+            if method_response.0 == "Email/set" {
+                if let Some(not_updated) = method_response.1.get("notUpdated") {
+                    if not_updated.get(id).is_some() {
+                        return Err(JmapError::Api(format!(
+                            "Failed to mark email as unread: {:?}",
+                            not_updated
+                        )));
+                    }
+                }
+                return Ok(());
+            }
+        }
+
+        Err(JmapError::Api("Unexpected response for Email/set".to_string()))
+    }
+
+    pub fn set_email_flagged(&self, id: &str, flagged: bool) -> Result<(), JmapError> {
+        log_info!("[JMAP] Email/set flagged={} for: {}", flagged, id);
+
+        let update_val = if flagged {
+            json!({ "keywords/$flagged": true })
+        } else {
+            json!({ "keywords/$flagged": null })
+        };
+
+        let request = JmapRequest {
+            using: vec!["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            method_calls: vec![MethodCall(
+                "Email/set",
+                json!({
+                    "accountId": self.account_id,
+                    "update": {
+                        id: update_val
+                    }
+                }),
+                "0".to_string(),
+            )],
+        };
+
+        let response = self.call(request)?;
+
+        if let Some(method_response) = response.method_responses.first() {
+            if method_response.0 == "Email/set" {
+                if let Some(not_updated) = method_response.1.get("notUpdated") {
+                    if not_updated.get(id).is_some() {
+                        return Err(JmapError::Api(format!(
+                            "Failed to set email flagged: {:?}",
+                            not_updated
+                        )));
+                    }
+                }
+                return Ok(());
+            }
+        }
+
+        Err(JmapError::Api("Unexpected response for Email/set".to_string()))
+    }
+
+    pub fn move_email(&self, id: &str, to_mailbox_id: &str) -> Result<(), JmapError> {
+        log_info!(
+            "[JMAP] Email/set moving {} to mailbox {}",
+            id,
+            to_mailbox_id
+        );
+
+        let request = JmapRequest {
+            using: vec!["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            method_calls: vec![MethodCall(
+                "Email/set",
+                json!({
+                    "accountId": self.account_id,
+                    "update": {
+                        id: {
+                            "mailboxIds": { to_mailbox_id: true }
+                        }
+                    }
+                }),
+                "0".to_string(),
+            )],
+        };
+
+        let response = self.call(request)?;
+
+        if let Some(method_response) = response.method_responses.first() {
+            if method_response.0 == "Email/set" {
+                if let Some(not_updated) = method_response.1.get("notUpdated") {
+                    if not_updated.get(id).is_some() {
+                        return Err(JmapError::Api(format!(
+                            "Failed to move email: {:?}",
                             not_updated
                         )));
                     }

@@ -235,11 +235,13 @@ impl View for MailboxListView {
                         mailbox.id.clone(),
                         mailbox.name.clone(),
                         self.page_size,
+                        self.mailboxes.clone(),
                     );
                     // Send the query command
                     let _ = self.cmd_tx.send(BackendCommand::QueryEmails {
                         mailbox_id: mailbox.id.clone(),
                         page_size: self.page_size,
+                        search_query: None,
                     });
                     ViewAction::Push(Box::new(view))
                 } else {
@@ -305,10 +307,12 @@ impl View for MailboxListView {
                     mailbox.id.clone(),
                     mailbox.name.clone(),
                     self.page_size,
+                    self.mailboxes.clone(),
                 );
                 let _ = self.cmd_tx.send(BackendCommand::QueryEmails {
                     mailbox_id: mailbox.id.clone(),
                     page_size: self.page_size,
+                    search_query: None,
                 });
                 return Some(ViewAction::Push(Box::new(view)));
             }

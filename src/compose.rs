@@ -203,6 +203,7 @@ mod tests {
             text_body: None,
             body_values: HashMap::new(),
             keywords: HashMap::new(),
+            mailbox_ids: HashMap::new(),
             message_id: Some(vec!["abc@example.com".to_string()]),
             references: None,
         };

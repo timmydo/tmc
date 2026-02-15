@@ -9,6 +9,7 @@ pub enum BackendCommand {
     QueryEmails {
         mailbox_id: String,
         page_size: u32,
+        search_query: Option<String>,
     },
     GetEmail {
         id: String,
@@ -18,6 +19,17 @@ pub enum BackendCommand {
     },
     MarkEmailRead {
         id: String,
+    },
+    MarkEmailUnread {
+        id: String,
+    },
+    SetEmailFlagged {
+        id: String,
+        flagged: bool,
+    },
+    MoveEmail {
+        id: String,
+        to_mailbox_id: String,
     },
     Shutdown,
 }
@@ -73,10 +85,11 @@ fn backend_loop(
             BackendCommand::QueryEmails {
                 mailbox_id,
                 page_size,
+                search_query,
             } => {
                 let result = (|| {
                     let query = client
-                        .query_emails(&mailbox_id, page_size, 0)
+                        .query_emails(&mailbox_id, page_size, 0, search_query.as_deref())
                         .map_err(|e| e.to_string())?;
                     let total = query.total;
                     let emails = if query.ids.is_empty() {
@@ -127,6 +140,21 @@ fn backend_loop(
             BackendCommand::MarkEmailRead { id } => {
                 if let Err(e) = client.mark_email_read(&id) {
                     log_warn!("Failed to mark email {} as read: {}", id, e);
+                }
+            }
+            BackendCommand::MarkEmailUnread { id } => {
+                if let Err(e) = client.mark_email_unread(&id) {
+                    log_warn!("Failed to mark email {} as unread: {}", id, e);
+                }
+            }
+            BackendCommand::SetEmailFlagged { id, flagged } => {
+                if let Err(e) = client.set_email_flagged(&id, flagged) {
+                    log_warn!("Failed to set email {} flagged={}: {}", id, flagged, e);
+                }
+            }
+            BackendCommand::MoveEmail { id, to_mailbox_id } => {
+                if let Err(e) = client.move_email(&id, &to_mailbox_id) {
+                    log_warn!("Failed to move email {}: {}", id, e);
                 }
             }
             BackendCommand::Shutdown => {

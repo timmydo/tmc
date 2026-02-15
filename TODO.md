@@ -34,10 +34,11 @@
 - [ ] NOTE: tmc does NOT send email — the editor/script is responsible for sending
 
 ## Phase 5: Email Management
-- [ ] Flag/unflag emails (Email/set keywords $flagged)
-- [ ] Delete emails (Email/set keywords $deleted or destroy)
-- [ ] Mark read/unread (Email/set keywords $seen)
-- [ ] Search (Email/query with filter text)
+- [x] Flag/unflag emails (Email/set keywords $flagged) — `f` key in email list and email view
+- [x] Mark read/unread (Email/set keywords $seen) — auto-read on open; `u` key to toggle in email list and email view
+- [x] Move to folder (Email/set mailboxIds) — `m` key in email list opens mailbox picker
+- [x] Search (Email/query with text filter) — `s` key in email list; Escape to clear search
+- NOTE: No delete feature — use move-to-folder (e.g. Trash/Archive) instead; retention policies on folders handle cleanup server-side
 
 ## Phase 6: Polish
 - [ ] Periodic background sync (configurable interval)
