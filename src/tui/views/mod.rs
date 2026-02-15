@@ -18,7 +18,7 @@ pub enum ViewAction {
 
 pub trait View {
     fn render(&self, term: &mut Terminal) -> io::Result<()>;
-    fn handle_key(&mut self, key: Key) -> ViewAction;
+    fn handle_key(&mut self, key: Key, term_rows: u16) -> ViewAction;
     /// Handle a response from the backend thread.
     /// Returns true if the view consumed the response and should re-render.
     fn on_response(&mut self, response: &BackendResponse) -> bool;
@@ -46,8 +46,8 @@ impl ViewStack {
         Ok(())
     }
 
-    pub fn handle_key(&mut self, key: Key) -> Option<ViewAction> {
-        self.views.last_mut().map(|view| view.handle_key(key))
+    pub fn handle_key(&mut self, key: Key, term_rows: u16) -> Option<ViewAction> {
+        self.views.last_mut().map(|view| view.handle_key(key, term_rows))
     }
 
     /// Route a backend response to the current view.

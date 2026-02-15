@@ -185,7 +185,8 @@ impl View for EmailView {
         term.flush()
     }
 
-    fn handle_key(&mut self, key: Key) -> ViewAction {
+    fn handle_key(&mut self, key: Key, term_rows: u16) -> ViewAction {
+        let page = (term_rows as usize).saturating_sub(1);
         match key {
             Key::Char('q') => ViewAction::Pop,
             Key::Char('n') | Key::Char('j') | Key::Down => {
@@ -201,11 +202,11 @@ impl View for EmailView {
                 ViewAction::Continue
             }
             Key::PageDown | Key::Char(' ') => {
-                self.scroll = (self.scroll + 20).min(self.lines.len().saturating_sub(1));
+                self.scroll = (self.scroll + page).min(self.lines.len().saturating_sub(1));
                 ViewAction::Continue
             }
             Key::PageUp => {
-                self.scroll = self.scroll.saturating_sub(20);
+                self.scroll = self.scroll.saturating_sub(page);
                 ViewAction::Continue
             }
             Key::Home => {

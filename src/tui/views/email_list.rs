@@ -203,7 +203,8 @@ impl View for EmailListView {
         term.flush()
     }
 
-    fn handle_key(&mut self, key: Key) -> ViewAction {
+    fn handle_key(&mut self, key: Key, term_rows: u16) -> ViewAction {
+        let page = (term_rows as usize).saturating_sub(4);
         match key {
             Key::Char('q') => ViewAction::Pop,
             Key::Char('n') | Key::Char('j') | Key::Down => {
@@ -220,12 +221,12 @@ impl View for EmailListView {
             }
             Key::PageDown => {
                 if !self.emails.is_empty() {
-                    self.cursor = (self.cursor + 20).min(self.emails.len() - 1);
+                    self.cursor = (self.cursor + page).min(self.emails.len() - 1);
                 }
                 ViewAction::Continue
             }
             Key::PageUp => {
-                self.cursor = self.cursor.saturating_sub(20);
+                self.cursor = self.cursor.saturating_sub(page);
                 ViewAction::Continue
             }
             Key::Home => {

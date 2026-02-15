@@ -61,7 +61,7 @@ pub fn run(
 
         // Read input
         if let Some(key) = read_key() {
-            let action = match stack.handle_key(key) {
+            let action = match stack.handle_key(key, term.rows) {
                 Some(action) => action,
                 None => break,
             };
