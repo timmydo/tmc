@@ -1,14 +1,17 @@
 use crate::backend::{BackendCommand, BackendResponse};
+use crate::compose;
 use crate::jmap::types::Email;
 use crate::tui::input::Key;
 use crate::tui::screen::Terminal;
 use crate::tui::views::email_view::EmailView;
+use crate::tui::views::help::HelpView;
 use crate::tui::views::{View, ViewAction};
 use std::io;
 use std::sync::mpsc;
 
 pub struct EmailListView {
     cmd_tx: mpsc::Sender<BackendCommand>,
+    from_address: String,
     mailbox_id: String,
     mailbox_name: String,
     page_size: u32,
@@ -22,12 +25,14 @@ pub struct EmailListView {
 impl EmailListView {
     pub fn new(
         cmd_tx: mpsc::Sender<BackendCommand>,
+        from_address: String,
         mailbox_id: String,
         mailbox_name: String,
         page_size: u32,
     ) -> Self {
         EmailListView {
             cmd_tx,
+            from_address,
             mailbox_id,
             mailbox_name,
             page_size,
@@ -213,9 +218,33 @@ impl View for EmailListView {
                 }
                 ViewAction::Continue
             }
+            Key::PageDown => {
+                if !self.emails.is_empty() {
+                    self.cursor = (self.cursor + 20).min(self.emails.len() - 1);
+                }
+                ViewAction::Continue
+            }
+            Key::PageUp => {
+                self.cursor = self.cursor.saturating_sub(20);
+                ViewAction::Continue
+            }
+            Key::Home => {
+                self.cursor = 0;
+                ViewAction::Continue
+            }
+            Key::End => {
+                if !self.emails.is_empty() {
+                    self.cursor = self.emails.len() - 1;
+                }
+                ViewAction::Continue
+            }
             Key::Enter => {
                 if let Some(email) = self.emails.get(self.cursor) {
-                    let view = EmailView::new(self.cmd_tx.clone(), email.id.clone());
+                    let view = EmailView::new(
+                        self.cmd_tx.clone(),
+                        self.from_address.clone(),
+                        email.id.clone(),
+                    );
                     let _ = self.cmd_tx.send(BackendCommand::GetEmail {
                         id: email.id.clone(),
                     });
@@ -228,6 +257,11 @@ impl View for EmailListView {
                 self.request_refresh();
                 ViewAction::Continue
             }
+            Key::Char('c') => {
+                let draft = compose::build_compose_draft(&self.from_address);
+                ViewAction::Compose(draft)
+            }
+            Key::Char('?') => ViewAction::Push(Box::new(HelpView::new())),
             _ => ViewAction::Continue,
         }
     }

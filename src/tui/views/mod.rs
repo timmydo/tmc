@@ -1,5 +1,6 @@
 pub mod email_list;
 pub mod email_view;
+pub mod help;
 pub mod mailbox_list;
 
 use super::input::Key;
@@ -12,6 +13,7 @@ pub enum ViewAction {
     Push(Box<dyn View>),
     Pop,
     Quit,
+    Compose(String),
 }
 
 pub trait View {
@@ -20,6 +22,10 @@ pub trait View {
     /// Handle a response from the backend thread.
     /// Returns true if the view consumed the response and should re-render.
     fn on_response(&mut self, response: &BackendResponse) -> bool;
+    /// Check for a pending action triggered by an async response.
+    fn take_pending_action(&mut self) -> Option<ViewAction> {
+        None
+    }
 }
 
 pub struct ViewStack {
@@ -52,6 +58,10 @@ impl ViewStack {
         } else {
             false
         }
+    }
+
+    pub fn current_mut(&mut self) -> Option<&mut Box<dyn View>> {
+        self.views.last_mut()
     }
 
     pub fn push(&mut self, view: Box<dyn View>) {

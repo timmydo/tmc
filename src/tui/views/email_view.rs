@@ -1,7 +1,9 @@
 use crate::backend::BackendResponse;
+use crate::compose;
 use crate::jmap::types::Email;
 use crate::tui::input::Key;
 use crate::tui::screen::Terminal;
+use crate::tui::views::help::HelpView;
 use crate::tui::views::{View, ViewAction};
 use std::io;
 use std::sync::mpsc;
@@ -9,23 +11,35 @@ use std::sync::mpsc;
 use crate::backend::BackendCommand;
 
 pub struct EmailView {
-    _cmd_tx: mpsc::Sender<BackendCommand>,
+    cmd_tx: mpsc::Sender<BackendCommand>,
+    from_address: String,
     email_id: String,
+    email: Option<Email>,
     lines: Vec<String>,
     scroll: usize,
     loading: bool,
     error: Option<String>,
+    pending_reply_all: Option<bool>,
+    pending_compose: Option<String>,
 }
 
 impl EmailView {
-    pub fn new(cmd_tx: mpsc::Sender<BackendCommand>, email_id: String) -> Self {
+    pub fn new(
+        cmd_tx: mpsc::Sender<BackendCommand>,
+        from_address: String,
+        email_id: String,
+    ) -> Self {
         EmailView {
-            _cmd_tx: cmd_tx,
+            cmd_tx,
+            from_address,
             email_id,
+            email: None,
             lines: Vec::new(),
             scroll: 0,
             loading: true,
             error: None,
+            pending_reply_all: None,
+            pending_compose: None,
         }
     }
 
@@ -81,6 +95,14 @@ impl EmailView {
             .as_deref()
             .unwrap_or("(no body)")
             .to_string()
+    }
+
+    fn request_reply(&mut self, reply_all: bool) {
+        self.pending_reply_all = Some(reply_all);
+        // Fetch the email with reply headers (messageId, references, replyTo, sentAt)
+        let _ = self.cmd_tx.send(BackendCommand::GetEmailForReply {
+            id: self.email_id.clone(),
+        });
     }
 }
 
@@ -140,11 +162,19 @@ impl View for EmailView {
         term.move_to(term.rows, 1)?;
         term.set_reverse()?;
         let total_lines = self.lines.len();
-        let status = format!(
-            " line {}/{} | q:back n/j:down p/k:up",
-            self.scroll + 1,
-            total_lines
-        );
+        let status = if self.pending_reply_all.is_some() {
+            format!(
+                " line {}/{} | Loading reply data... | q:back",
+                self.scroll + 1,
+                total_lines
+            )
+        } else {
+            format!(
+                " line {}/{} | q:back n/j:down p/k:up r:reply R:reply-all c:compose ?:help",
+                self.scroll + 1,
+                total_lines
+            )
+        };
         term.write_truncated(&status, term.cols)?;
         let remaining = (term.cols as usize).saturating_sub(status.len());
         for _ in 0..remaining {
@@ -186,6 +216,19 @@ impl View for EmailView {
                 self.scroll = self.lines.len().saturating_sub(1);
                 ViewAction::Continue
             }
+            Key::Char('r') => {
+                self.request_reply(false);
+                ViewAction::Continue
+            }
+            Key::Char('R') => {
+                self.request_reply(true);
+                ViewAction::Continue
+            }
+            Key::Char('c') => {
+                let draft = compose::build_compose_draft(&self.from_address);
+                ViewAction::Compose(draft)
+            }
+            Key::Char('?') => ViewAction::Push(Box::new(HelpView::new())),
             _ => ViewAction::Continue,
         }
     }
@@ -197,6 +240,7 @@ impl View for EmailView {
                 match result.as_ref() {
                     Ok(email) => {
                         self.lines = Self::render_email(email);
+                        self.email = Some(email.clone());
                         self.error = None;
                     }
                     Err(e) => {
@@ -205,7 +249,33 @@ impl View for EmailView {
                 }
                 true
             }
+            BackendResponse::EmailForReply { id, result } if *id == self.email_id => {
+                let reply_all = self.pending_reply_all.take();
+                match result.as_ref() {
+                    Ok(email) => {
+                        self.email = Some(email.clone());
+                        if let Some(reply_all) = reply_all {
+                            let draft = compose::build_reply_draft(
+                                email,
+                                reply_all,
+                                &self.from_address,
+                            );
+                            self.pending_compose = Some(draft);
+                        }
+                    }
+                    Err(e) => {
+                        self.error = Some(format!("Failed to load reply data: {}", e));
+                    }
+                }
+                true
+            }
             _ => false,
         }
+    }
+
+    fn take_pending_action(&mut self) -> Option<ViewAction> {
+        self.pending_compose
+            .take()
+            .map(ViewAction::Compose)
     }
 }

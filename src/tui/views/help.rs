@@ -1,0 +1,146 @@
+use crate::backend::BackendResponse;
+use crate::tui::input::Key;
+use crate::tui::screen::Terminal;
+use crate::tui::views::{View, ViewAction};
+use std::io;
+
+pub struct HelpView {
+    lines: Vec<String>,
+    scroll: usize,
+}
+
+impl HelpView {
+    pub fn new() -> Self {
+        let lines = vec![
+            "tmc - Timmy's Mail Console".to_string(),
+            "=========================".to_string(),
+            String::new(),
+            "Global".to_string(),
+            "------".to_string(),
+            "  ?           Show this help".to_string(),
+            "  c           Compose new email".to_string(),
+            String::new(),
+            "Mailbox List".to_string(),
+            "------------".to_string(),
+            "  q           Quit".to_string(),
+            "  n/j/Down    Next mailbox".to_string(),
+            "  p/k/Up      Previous mailbox".to_string(),
+            "  Enter       Open mailbox".to_string(),
+            "  g           Refresh".to_string(),
+            "  PgDn        Page down".to_string(),
+            "  PgUp        Page up".to_string(),
+            "  Home        Jump to top".to_string(),
+            "  End         Jump to bottom".to_string(),
+            String::new(),
+            "Email List".to_string(),
+            "----------".to_string(),
+            "  q           Back to mailbox list".to_string(),
+            "  n/j/Down    Next email".to_string(),
+            "  p/k/Up      Previous email".to_string(),
+            "  Enter       Open email".to_string(),
+            "  g           Refresh".to_string(),
+            "  PgDn        Page down".to_string(),
+            "  PgUp        Page up".to_string(),
+            "  Home        Jump to top".to_string(),
+            "  End         Jump to bottom".to_string(),
+            String::new(),
+            "Email View".to_string(),
+            "----------".to_string(),
+            "  q           Back to email list".to_string(),
+            "  n/j/Down    Scroll down".to_string(),
+            "  p/k/Up      Scroll up".to_string(),
+            "  Space/PgDn  Page down".to_string(),
+            "  PgUp        Page up".to_string(),
+            "  Home        Jump to top".to_string(),
+            "  End         Jump to bottom".to_string(),
+            "  r           Reply".to_string(),
+            "  R           Reply all".to_string(),
+            String::new(),
+        ];
+
+        HelpView { lines, scroll: 0 }
+    }
+}
+
+impl View for HelpView {
+    fn render(&self, term: &mut Terminal) -> io::Result<()> {
+        term.clear()?;
+
+        let visible_rows = (term.rows as usize).saturating_sub(1);
+
+        for (i, line) in self.lines.iter().skip(self.scroll).enumerate().take(visible_rows) {
+            let row = 1 + i as u16;
+            term.move_to(row, 1)?;
+
+            // Bold section headers (lines that are followed by dashes or equal signs)
+            let is_header = !line.is_empty()
+                && !line.starts_with(' ')
+                && !line.starts_with('-')
+                && !line.starts_with('=');
+
+            if is_header {
+                term.set_bold()?;
+                term.write_truncated(line, term.cols)?;
+                term.reset_attr()?;
+            } else {
+                term.write_truncated(line, term.cols)?;
+            }
+        }
+
+        // Status bar
+        term.move_to(term.rows, 1)?;
+        term.set_reverse()?;
+        let status = format!(
+            " Help | line {}/{} | q:close n/j:down p/k:up",
+            self.scroll + 1,
+            self.lines.len()
+        );
+        term.write_truncated(&status, term.cols)?;
+        let remaining = (term.cols as usize).saturating_sub(status.len());
+        for _ in 0..remaining {
+            term.write_str(" ")?;
+        }
+        term.reset_attr()?;
+
+        term.flush()
+    }
+
+    fn handle_key(&mut self, key: Key) -> ViewAction {
+        match key {
+            Key::Char('q') | Key::Char('?') | Key::Escape => ViewAction::Pop,
+            Key::Char('n') | Key::Char('j') | Key::Down => {
+                if self.scroll + 1 < self.lines.len() {
+                    self.scroll += 1;
+                }
+                ViewAction::Continue
+            }
+            Key::Char('p') | Key::Char('k') | Key::Up => {
+                if self.scroll > 0 {
+                    self.scroll -= 1;
+                }
+                ViewAction::Continue
+            }
+            Key::PageDown | Key::Char(' ') => {
+                self.scroll = (self.scroll + 20).min(self.lines.len().saturating_sub(1));
+                ViewAction::Continue
+            }
+            Key::PageUp => {
+                self.scroll = self.scroll.saturating_sub(20);
+                ViewAction::Continue
+            }
+            Key::Home => {
+                self.scroll = 0;
+                ViewAction::Continue
+            }
+            Key::End => {
+                self.scroll = self.lines.len().saturating_sub(1);
+                ViewAction::Continue
+            }
+            _ => ViewAction::Continue,
+        }
+    }
+
+    fn on_response(&mut self, _response: &BackendResponse) -> bool {
+        false
+    }
+}

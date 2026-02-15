@@ -1,14 +1,17 @@
 use crate::backend::{BackendCommand, BackendResponse};
+use crate::compose;
 use crate::jmap::types::Mailbox;
 use crate::tui::input::Key;
 use crate::tui::screen::Terminal;
 use crate::tui::views::email_list::EmailListView;
+use crate::tui::views::help::HelpView;
 use crate::tui::views::{View, ViewAction};
 use std::io;
 use std::sync::mpsc;
 
 pub struct MailboxListView {
     cmd_tx: mpsc::Sender<BackendCommand>,
+    from_address: String,
     page_size: u32,
     mailboxes: Vec<Mailbox>,
     cursor: usize,
@@ -17,9 +20,14 @@ pub struct MailboxListView {
 }
 
 impl MailboxListView {
-    pub fn new(cmd_tx: mpsc::Sender<BackendCommand>, page_size: u32) -> Self {
+    pub fn new(
+        cmd_tx: mpsc::Sender<BackendCommand>,
+        from_address: String,
+        page_size: u32,
+    ) -> Self {
         MailboxListView {
             cmd_tx,
+            from_address,
             page_size,
             mailboxes: Vec::new(),
             cursor: 0,
@@ -136,7 +144,7 @@ impl View for MailboxListView {
             " q:quit g:refresh".to_string()
         } else {
             format!(
-                " {}/{} | q:quit n/p:navigate RET:open g:refresh",
+                " {}/{} | q:quit n/p:navigate RET:open g:refresh c:compose ?:help",
                 self.cursor + 1,
                 self.mailboxes.len()
             )
@@ -166,10 +174,31 @@ impl View for MailboxListView {
                 }
                 ViewAction::Continue
             }
+            Key::PageDown => {
+                if !self.mailboxes.is_empty() {
+                    self.cursor = (self.cursor + 20).min(self.mailboxes.len() - 1);
+                }
+                ViewAction::Continue
+            }
+            Key::PageUp => {
+                self.cursor = self.cursor.saturating_sub(20);
+                ViewAction::Continue
+            }
+            Key::Home => {
+                self.cursor = 0;
+                ViewAction::Continue
+            }
+            Key::End => {
+                if !self.mailboxes.is_empty() {
+                    self.cursor = self.mailboxes.len() - 1;
+                }
+                ViewAction::Continue
+            }
             Key::Enter => {
                 if let Some(mailbox) = self.mailboxes.get(self.cursor) {
                     let view = EmailListView::new(
                         self.cmd_tx.clone(),
+                        self.from_address.clone(),
                         mailbox.id.clone(),
                         mailbox.name.clone(),
                         self.page_size,
@@ -188,6 +217,11 @@ impl View for MailboxListView {
                 self.request_refresh();
                 ViewAction::Continue
             }
+            Key::Char('c') => {
+                let draft = compose::build_compose_draft(&self.from_address);
+                ViewAction::Compose(draft)
+            }
+            Key::Char('?') => ViewAction::Push(Box::new(HelpView::new())),
             _ => ViewAction::Continue,
         }
     }

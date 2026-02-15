@@ -2,6 +2,7 @@
 mod log;
 
 mod backend;
+mod compose;
 mod config;
 mod jmap;
 mod tui;
@@ -86,7 +87,12 @@ fn main() {
         };
 
     // Enter TUI
-    if let Err(e) = tui::run(client, config.ui.page_size) {
+    if let Err(e) = tui::run(
+        client,
+        config.ui.page_size,
+        config.ui.editor,
+        config.jmap.username,
+    ) {
         eprintln!("TUI error: {}", e);
         std::process::exit(1);
     }

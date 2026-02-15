@@ -13,6 +13,9 @@ pub enum BackendCommand {
     GetEmail {
         id: String,
     },
+    GetEmailForReply {
+        id: String,
+    },
     Shutdown,
 }
 
@@ -25,6 +28,10 @@ pub enum BackendResponse {
         total: Option<u32>,
     },
     EmailBody {
+        id: String,
+        result: Box<Result<Email, String>>,
+    },
+    EmailForReply {
         id: String,
         result: Box<Result<Email, String>>,
     },
@@ -97,6 +104,19 @@ fn backend_loop(
                     });
 
                 let _ = resp_tx.send(BackendResponse::EmailBody {
+                    id,
+                    result: Box::new(result),
+                });
+            }
+            BackendCommand::GetEmailForReply { id } => {
+                let result = client
+                    .get_email_for_reply(&id)
+                    .map_err(|e| e.to_string())
+                    .and_then(|opt| {
+                        opt.ok_or_else(|| "Email not found".to_string())
+                    });
+
+                let _ = resp_tx.send(BackendResponse::EmailForReply {
                     id,
                     result: Box::new(result),
                 });
