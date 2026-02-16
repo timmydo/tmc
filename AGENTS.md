@@ -85,7 +85,7 @@ Credentials are fetched by running `password_command`; there is no interactive p
 - Global: `?` help, `c` compose.
 - Mailbox list: `q`, `n/p`, `j/k`, arrows, `RET`, `g`, `a`, mouse click/wheel.
 - Email list: `q`, `n/p`, `j/k`, arrows, `RET`, `g`, `f`, `u`, `m`, `s`, `Esc` (clear search), mouse click/wheel.
-- Email view: `q`, `n/p`, `j/k`, arrows, `PgUp/PgDn/Space/Home/End`, `r`, `R`, `f`, `u`, `c`.
+- Email view: `q`, `n/p`, `j/k`, arrows, `PgUp/PgDn/Space/Home/End`, `r`, `R`, `v`, `f`, `u`, `c`.
 - Help view: `q`/`?`/`Esc` close + navigation keys.
 
 ## Constraints and Non-Goals

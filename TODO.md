@@ -50,5 +50,5 @@
 
 ## Phase 7: Misc
 
-- [ ] 'v' keybinding to show/hide all the mail headers for an email message
+- [x] 'v' keybinding to show/hide all the mail headers for an email message
 - [ ] design and build mail sorting language

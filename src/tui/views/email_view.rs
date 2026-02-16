@@ -47,6 +47,9 @@ pub struct EmailView {
     next_write_op_id: u64,
     pending_write_ops: HashMap<u64, PendingWriteOp>,
     attachment_picking: bool,
+    show_all_headers: bool,
+    raw_headers_cache: HashMap<String, String>,
+    raw_headers_loading: bool,
     thread_id: Option<String>,
     thread_emails: Vec<Email>,
 }
@@ -73,6 +76,9 @@ impl EmailView {
             next_write_op_id: 1,
             pending_write_ops: HashMap::new(),
             attachment_picking: false,
+            show_all_headers: false,
+            raw_headers_cache: HashMap::new(),
+            raw_headers_loading: false,
             thread_id: None,
             thread_emails: Vec::new(),
         }
@@ -103,42 +109,60 @@ impl EmailView {
             next_write_op_id: 1,
             pending_write_ops: HashMap::new(),
             attachment_picking: false,
+            show_all_headers: false,
+            raw_headers_cache: HashMap::new(),
+            raw_headers_loading: false,
             thread_id: Some(thread_id),
             thread_emails: Vec::new(),
         }
     }
 
-    fn render_email(email: &Email) -> (Vec<String>, Vec<LineKind>) {
+    fn render_headers(
+        email: &Email,
+        raw_headers: Option<&str>,
+        lines: &mut Vec<String>,
+        kinds: &mut Vec<LineKind>,
+    ) {
+        if let Some(raw) = raw_headers {
+            for line in raw.lines() {
+                lines.push(line.to_string());
+                kinds.push(LineKind::Header);
+            }
+        } else {
+            if let Some(ref from) = email.from {
+                let addrs: Vec<String> = from.iter().map(|a| a.to_string()).collect();
+                lines.push(format!("From: {}", addrs.join(", ")));
+                kinds.push(LineKind::Header);
+            }
+            if let Some(ref to) = email.to {
+                let addrs: Vec<String> = to.iter().map(|a| a.to_string()).collect();
+                lines.push(format!("To: {}", addrs.join(", ")));
+                kinds.push(LineKind::Header);
+            }
+            if let Some(ref cc) = email.cc {
+                if !cc.is_empty() {
+                    let addrs: Vec<String> = cc.iter().map(|a| a.to_string()).collect();
+                    lines.push(format!("Cc: {}", addrs.join(", ")));
+                    kinds.push(LineKind::Header);
+                }
+            }
+            if let Some(ref date) = email.received_at {
+                lines.push(format!("Date: {}", date));
+                kinds.push(LineKind::Header);
+            }
+            lines.push(format!(
+                "Subject: {}",
+                email.subject.as_deref().unwrap_or("(no subject)")
+            ));
+            kinds.push(LineKind::Header);
+        }
+    }
+
+    fn render_email(email: &Email, raw_headers: Option<&str>) -> (Vec<String>, Vec<LineKind>) {
         let mut lines = Vec::new();
         let mut kinds = Vec::new();
 
-        // Headers
-        if let Some(ref from) = email.from {
-            let addrs: Vec<String> = from.iter().map(|a| a.to_string()).collect();
-            lines.push(format!("From: {}", addrs.join(", ")));
-            kinds.push(LineKind::Header);
-        }
-        if let Some(ref to) = email.to {
-            let addrs: Vec<String> = to.iter().map(|a| a.to_string()).collect();
-            lines.push(format!("To: {}", addrs.join(", ")));
-            kinds.push(LineKind::Header);
-        }
-        if let Some(ref cc) = email.cc {
-            if !cc.is_empty() {
-                let addrs: Vec<String> = cc.iter().map(|a| a.to_string()).collect();
-                lines.push(format!("Cc: {}", addrs.join(", ")));
-                kinds.push(LineKind::Header);
-            }
-        }
-        if let Some(ref date) = email.received_at {
-            lines.push(format!("Date: {}", date));
-            kinds.push(LineKind::Header);
-        }
-        lines.push(format!(
-            "Subject: {}",
-            email.subject.as_deref().unwrap_or("(no subject)")
-        ));
-        kinds.push(LineKind::Header);
+        Self::render_headers(email, raw_headers, &mut lines, &mut kinds);
 
         // Attachments
         if let Some(ref attachments) = email.attachments {
@@ -173,7 +197,10 @@ impl EmailView {
         (lines, kinds)
     }
 
-    fn render_thread_emails(emails: &[Email]) -> (Vec<String>, Vec<LineKind>) {
+    fn render_thread_emails(
+        emails: &[Email],
+        raw_headers_cache: &HashMap<String, String>,
+    ) -> (Vec<String>, Vec<LineKind>) {
         let mut lines = Vec::new();
         let mut kinds = Vec::new();
         for (i, email) in emails.iter().enumerate() {
@@ -185,33 +212,8 @@ impl EmailView {
                 lines.push(String::new());
                 kinds.push(LineKind::Body);
             }
-            // Headers for each email in thread
-            if let Some(ref from) = email.from {
-                let addrs: Vec<String> = from.iter().map(|a| a.to_string()).collect();
-                lines.push(format!("From: {}", addrs.join(", ")));
-                kinds.push(LineKind::Header);
-            }
-            if let Some(ref to) = email.to {
-                let addrs: Vec<String> = to.iter().map(|a| a.to_string()).collect();
-                lines.push(format!("To: {}", addrs.join(", ")));
-                kinds.push(LineKind::Header);
-            }
-            if let Some(ref cc) = email.cc {
-                if !cc.is_empty() {
-                    let addrs: Vec<String> = cc.iter().map(|a| a.to_string()).collect();
-                    lines.push(format!("Cc: {}", addrs.join(", ")));
-                    kinds.push(LineKind::Header);
-                }
-            }
-            if let Some(ref date) = email.received_at {
-                lines.push(format!("Date: {}", date));
-                kinds.push(LineKind::Header);
-            }
-            lines.push(format!(
-                "Subject: {}",
-                email.subject.as_deref().unwrap_or("(no subject)")
-            ));
-            kinds.push(LineKind::Header);
+            let raw = raw_headers_cache.get(&email.id).map(|s| s.as_str());
+            Self::render_headers(email, raw, &mut lines, &mut kinds);
             lines.push(String::new());
             kinds.push(LineKind::Body);
             let body_text = Self::extract_body(email);
@@ -304,6 +306,29 @@ impl EmailView {
             .and_then(|e| e.attachments.as_ref())
             .map(|a| a.len())
             .unwrap_or(0)
+    }
+
+    fn rerender_lines(&mut self) {
+        if self.thread_id.is_some() && !self.thread_emails.is_empty() {
+            let cache = if self.show_all_headers {
+                &self.raw_headers_cache
+            } else {
+                // Empty map = use structured headers
+                &HashMap::new()
+            };
+            let (lines, kinds) = Self::render_thread_emails(&self.thread_emails, cache);
+            self.lines = lines;
+            self.line_kinds = kinds;
+        } else if let Some(ref email) = self.email {
+            let raw = if self.show_all_headers {
+                self.raw_headers_cache.get(&email.id).map(|s| s.as_str())
+            } else {
+                None
+            };
+            let (lines, kinds) = Self::render_email(email, raw);
+            self.lines = lines;
+            self.line_kinds = kinds;
+        }
     }
 
     fn rollback_pending_write(&mut self, op: PendingWriteOp) {
@@ -553,6 +578,38 @@ impl View for EmailView {
                 let draft = compose::build_compose_draft(&self.from_address);
                 ViewAction::Compose(draft)
             }
+            Key::Char('v') => {
+                self.show_all_headers = !self.show_all_headers;
+                if self.show_all_headers {
+                    // Fetch raw headers for emails that aren't cached yet
+                    let ids_to_fetch: Vec<String> = if self.thread_id.is_some() {
+                        self.thread_emails
+                            .iter()
+                            .filter(|e| !self.raw_headers_cache.contains_key(&e.id))
+                            .map(|e| e.id.clone())
+                            .collect()
+                    } else {
+                        let id = self.email_id.clone();
+                        if self.raw_headers_cache.contains_key(&id) {
+                            vec![]
+                        } else {
+                            vec![id]
+                        }
+                    };
+                    if ids_to_fetch.is_empty() {
+                        self.rerender_lines();
+                    } else {
+                        self.raw_headers_loading = true;
+                        self.status_message = Some("Loading raw headers...".to_string());
+                        for id in ids_to_fetch {
+                            let _ = self.cmd_tx.send(BackendCommand::GetEmailRawHeaders { id });
+                        }
+                    }
+                } else {
+                    self.rerender_lines();
+                }
+                ViewAction::Continue
+            }
             Key::Char('?') => ViewAction::Push(Box::new(HelpView::new())),
             Key::ScrollUp => {
                 if self.scroll > 0 {
@@ -583,7 +640,13 @@ impl View for EmailView {
                             self.email_id = last.id.clone();
                             self.email = Some(last.clone());
                         }
-                        let (lines, kinds) = Self::render_thread_emails(&self.thread_emails);
+                        let empty = HashMap::new();
+                        let cache = if self.show_all_headers {
+                            &self.raw_headers_cache
+                        } else {
+                            &empty
+                        };
+                        let (lines, kinds) = Self::render_thread_emails(&self.thread_emails, cache);
                         self.lines = lines;
                         self.line_kinds = kinds;
                         self.error = None;
@@ -614,7 +677,12 @@ impl View for EmailView {
                 self.loading = false;
                 match result.as_ref() {
                     Ok(email) => {
-                        let (lines, kinds) = Self::render_email(email);
+                        let raw = if self.show_all_headers {
+                            self.raw_headers_cache.get(&email.id).map(|s| s.as_str())
+                        } else {
+                            None
+                        };
+                        let (lines, kinds) = Self::render_email(email, raw);
                         self.lines = lines;
                         self.line_kinds = kinds;
                         self.email = Some(email.clone());
@@ -694,6 +762,32 @@ impl View for EmailView {
                     }
                     Err(e) => {
                         self.status_message = Some(format!("Download failed: {}", e));
+                    }
+                }
+                true
+            }
+            BackendResponse::EmailRawHeaders { id, result } => {
+                match result {
+                    Ok(headers) => {
+                        self.raw_headers_cache.insert(id.clone(), headers.clone());
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Failed to load raw headers: {}", e));
+                    }
+                }
+                // Check if all requested headers have arrived
+                let all_loaded = if self.thread_id.is_some() {
+                    self.thread_emails
+                        .iter()
+                        .all(|e| self.raw_headers_cache.contains_key(&e.id))
+                } else {
+                    self.raw_headers_cache.contains_key(&self.email_id)
+                };
+                if all_loaded {
+                    self.raw_headers_loading = false;
+                    self.status_message = None;
+                    if self.show_all_headers {
+                        self.rerender_lines();
                     }
                 }
                 true

@@ -44,6 +44,9 @@ pub enum BackendCommand {
         thread_id: String,
         email_ids: Vec<String>,
     },
+    GetEmailRawHeaders {
+        id: String,
+    },
     DownloadAttachment {
         blob_id: String,
         name: String,
@@ -86,6 +89,10 @@ pub enum BackendResponse {
         thread_id: String,
         #[allow(dead_code)]
         result: Result<(), String>,
+    },
+    EmailRawHeaders {
+        id: String,
+        result: Result<String, String>,
     },
     AttachmentDownloaded {
         name: String,
@@ -290,6 +297,23 @@ fn backend_loop(
                     .mark_emails_read(&email_ids)
                     .map_err(|e| e.to_string());
                 let _ = resp_tx.send(BackendResponse::ThreadMarkedRead { thread_id, result });
+            }
+            BackendCommand::GetEmailRawHeaders { id } => {
+                let result = client
+                    .get_email_raw(&id)
+                    .map_err(|e| e.to_string())
+                    .and_then(|opt| opt.ok_or_else(|| "Email not found".to_string()))
+                    .map(|raw| {
+                        // Extract just the headers (everything before the first blank line)
+                        if let Some(pos) = raw.find("\r\n\r\n") {
+                            raw[..pos].to_string()
+                        } else if let Some(pos) = raw.find("\n\n") {
+                            raw[..pos].to_string()
+                        } else {
+                            raw
+                        }
+                    });
+                let _ = resp_tx.send(BackendResponse::EmailRawHeaders { id, result });
             }
             BackendCommand::DownloadAttachment {
                 blob_id,

@@ -77,6 +77,7 @@ impl HelpView {
             "  r           Reply".to_string(),
             "  R           Reply all".to_string(),
             "  a           Download/open attachment".to_string(),
+            "  v           Toggle raw headers (DKIM, Received, etc)".to_string(),
             "  f           Toggle flagged".to_string(),
             "  u           Toggle read/unread".to_string(),
             String::new(),
