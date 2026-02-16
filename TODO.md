@@ -54,3 +54,26 @@
 - [x] 'F' for forward email
 - [x] --prompt=xyz command line parameter to generate prompts to AI agents so they will help you generate 'config', 'rules', etc.
 
+## Phase 8: Integration testing
+
+Also add command line options --config and --rules for providing a
+custom config or rules file. This can be used to create a fully
+integrated test environment (passing a config that points to a JMAP
+server running on localhost). Do this also and create tests for
+this. Implement a mock JMAP backend that can be used to test CLI mode.
+Add a couple of integration tests for CLI mode.
+
+## Phase 9: CLI Triage Automation
+
+- [ ] Ensure `archive` and `delete_email` mailbox resolution works immediately after `connect`:
+  fetch/cache mailboxes on-demand when folder resolution is attempted and cache is empty/stale.
+- [ ] Add explicit mailbox-target configuration for CLI actions:
+  support mailbox IDs in config (e.g., `archive_mailbox_id`, `deleted_mailbox_id`) with name/role fallback.
+- [ ] Add date-range filtering to `query_emails` (e.g., `received_after`, `received_before`) to avoid client-side pagination scans.
+- [ ] Add bulk mutation commands for triage workflows (e.g., `bulk_move`, `bulk_archive`, `bulk_delete_email`) with per-message status.
+- [ ] Add dry-run triage suggestions command (e.g., `triage_suggest`) returning `archive`/`trash`/`keep` candidates with reasons.
+- [ ] Add two-step plan/apply flow for safe automation:
+  generate proposal first, then apply by plan ID or explicit approved IDs.
+- [ ] Extend rules format to support triage actions and confidence scoring (`archive`, `trash`, `keep`) for reusable automation.
+- [ ] Add integration tests for:
+  post-`connect` archive/delete behavior, bulk operations, date filters, and plan/apply safety checks.

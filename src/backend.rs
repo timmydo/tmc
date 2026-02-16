@@ -26,6 +26,8 @@ pub enum BackendCommand {
         page_size: u32,
         position: u32,
         search_query: Option<String>,
+        received_after: Option<String>,
+        received_before: Option<String>,
     },
     GetEmail {
         id: String,
@@ -311,19 +313,30 @@ fn backend_loop(
                 page_size,
                 position,
                 search_query,
+                received_after,
+                received_before,
             } => {
                 log_info!(
-                    "[Backend] cmd#{} QueryEmails origin='{}' mailbox_id='{}' page_size={} position={} search={:?}",
+                    "[Backend] cmd#{} QueryEmails origin='{}' mailbox_id='{}' page_size={} position={} search={:?} after={:?} before={:?}",
                     command_seq,
                     origin,
                     mailbox_id,
                     page_size,
                     position,
-                    search_query
+                    search_query,
+                    received_after,
+                    received_before
                 );
                 let result = (|| {
                     let query = client
-                        .query_emails(&mailbox_id, page_size, position, search_query.as_deref())
+                        .query_emails(
+                            &mailbox_id,
+                            page_size,
+                            position,
+                            search_query.as_deref(),
+                            received_after.as_deref(),
+                            received_before.as_deref(),
+                        )
                         .map_err(|e| e.to_string())?;
                     let total = query.total;
                     let position = query.position;

@@ -1,9 +1,262 @@
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
+
+#[derive(Clone)]
+struct EmailRecord {
+    id: String,
+    thread_id: String,
+    from_name: Option<String>,
+    from_email: String,
+    subject: String,
+    body: String,
+    received_at: String,
+    mailbox_id: String,
+    is_read: bool,
+}
+
+impl EmailRecord {
+    fn to_jmap_email(&self) -> Value {
+        let mut keywords = serde_json::Map::new();
+        if self.is_read {
+            keywords.insert("$seen".to_string(), json!(true));
+        }
+
+        json!({
+            "id": self.id,
+            "threadId": self.thread_id,
+            "from": [{"name": self.from_name, "email": self.from_email}],
+            "to": [{"name": "Test User", "email": "test@example.com"}],
+            "cc": null,
+            "replyTo": null,
+            "subject": self.subject,
+            "receivedAt": self.received_at,
+            "sentAt": self.received_at,
+            "preview": self.body.chars().take(100).collect::<String>(),
+            "textBody": [{"partId": "1"}],
+            "bodyValues": {"1": {"value": self.body, "isEncodingProblem": false, "isTruncated": false}},
+            "keywords": keywords,
+            "mailboxIds": {self.mailbox_id.clone(): true},
+            "messageId": [format!("<{}@example.com>", self.id)],
+            "references": null,
+            "attachments": []
+        })
+    }
+}
+
+struct MockState {
+    emails: HashMap<String, EmailRecord>,
+}
+
+impl MockState {
+    fn new() -> Self {
+        let mut emails = HashMap::new();
+
+        let seed = vec![
+            EmailRecord {
+                id: "email-001".to_string(),
+                thread_id: "thread-001".to_string(),
+                from_name: Some("Alice".to_string()),
+                from_email: "alice@example.com".to_string(),
+                subject: "Hello World".to_string(),
+                body: "This is the body of email 001.".to_string(),
+                received_at: "2025-01-15T10:30:00Z".to_string(),
+                mailbox_id: "mbox-inbox".to_string(),
+                is_read: true,
+            },
+            EmailRecord {
+                id: "email-002".to_string(),
+                thread_id: "thread-002".to_string(),
+                from_name: Some("Bob".to_string()),
+                from_email: "bob@example.com".to_string(),
+                subject: "Meeting Tomorrow".to_string(),
+                body: "Let's meet at 10am.".to_string(),
+                received_at: "2025-12-06T11:00:00Z".to_string(),
+                mailbox_id: "mbox-inbox".to_string(),
+                is_read: false,
+            },
+            EmailRecord {
+                id: "email-003".to_string(),
+                thread_id: "thread-003".to_string(),
+                from_name: Some("Loan Team".to_string()),
+                from_email: "loan@equityexcelloans.com".to_string(),
+                subject: "HARP program is approaching cap".to_string(),
+                body: "Spammy mortgage email.".to_string(),
+                received_at: "2025-12-20T09:00:00Z".to_string(),
+                mailbox_id: "mbox-inbox".to_string(),
+                is_read: false,
+            },
+            EmailRecord {
+                id: "email-004".to_string(),
+                thread_id: "thread-004".to_string(),
+                from_name: Some("Delta".to_string()),
+                from_email: "DeltaAirLines@t.delta.com".to_string(),
+                subject: "Your Flight Receipt".to_string(),
+                body: "Flight receipt details.".to_string(),
+                received_at: "2025-12-22T08:00:00Z".to_string(),
+                mailbox_id: "mbox-inbox".to_string(),
+                is_read: true,
+            },
+            EmailRecord {
+                id: "email-005".to_string(),
+                thread_id: "thread-005".to_string(),
+                from_name: Some("Archive Seed".to_string()),
+                from_email: "seed@example.com".to_string(),
+                subject: "Already archived".to_string(),
+                body: "Archive mailbox seed".to_string(),
+                received_at: "2025-11-01T08:00:00Z".to_string(),
+                mailbox_id: "mbox-archive".to_string(),
+                is_read: true,
+            },
+        ];
+
+        for e in seed {
+            emails.insert(e.id.clone(), e);
+        }
+
+        Self { emails }
+    }
+
+    fn query_email_ids(&self, filter: &Value, limit: usize, position: usize) -> Vec<String> {
+        let mut in_mailbox: Option<String> = None;
+        let mut text: Option<String> = None;
+        let mut after: Option<String> = None;
+        let mut before: Option<String> = None;
+
+        fn parse_filter(
+            f: &Value,
+            in_mailbox: &mut Option<String>,
+            text: &mut Option<String>,
+            after: &mut Option<String>,
+            before: &mut Option<String>,
+        ) {
+            if let Some(obj) = f.as_object() {
+                if let Some(v) = obj.get("inMailbox").and_then(|v| v.as_str()) {
+                    *in_mailbox = Some(v.to_string());
+                }
+                if let Some(v) = obj.get("text").and_then(|v| v.as_str()) {
+                    *text = Some(v.to_ascii_lowercase());
+                }
+                if let Some(v) = obj.get("after").and_then(|v| v.as_str()) {
+                    *after = Some(v.to_string());
+                }
+                if let Some(v) = obj.get("before").and_then(|v| v.as_str()) {
+                    *before = Some(v.to_string());
+                }
+                if obj.get("operator").and_then(|v| v.as_str()) == Some("AND") {
+                    if let Some(conditions) = obj.get("conditions").and_then(|v| v.as_array()) {
+                        for c in conditions {
+                            parse_filter(c, in_mailbox, text, after, before);
+                        }
+                    }
+                }
+            }
+        }
+
+        parse_filter(filter, &mut in_mailbox, &mut text, &mut after, &mut before);
+
+        let mut emails: Vec<&EmailRecord> = self
+            .emails
+            .values()
+            .filter(|e| {
+                if let Some(ref mbox) = in_mailbox {
+                    if &e.mailbox_id != mbox {
+                        return false;
+                    }
+                }
+                if let Some(ref q) = text {
+                    let hay = format!(
+                        "{} {} {}",
+                        e.subject.to_ascii_lowercase(),
+                        e.body.to_ascii_lowercase(),
+                        e.from_email.to_ascii_lowercase()
+                    );
+                    if !hay.contains(q) {
+                        return false;
+                    }
+                }
+                if let Some(ref a) = after {
+                    if e.received_at <= *a {
+                        return false;
+                    }
+                }
+                if let Some(ref b) = before {
+                    if e.received_at >= *b {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+
+        emails.sort_by(|a, b| b.received_at.cmp(&a.received_at));
+
+        emails
+            .into_iter()
+            .skip(position)
+            .take(limit)
+            .map(|e| e.id.clone())
+            .collect()
+    }
+
+    fn apply_email_set(&mut self, args: &Value) -> Value {
+        let mut updated = serde_json::Map::new();
+        let mut not_updated = serde_json::Map::new();
+        let mut not_destroyed = serde_json::Map::new();
+
+        if let Some(update) = args.get("update").and_then(|v| v.as_object()) {
+            for (id, patch) in update {
+                let Some(email) = self.emails.get_mut(id) else {
+                    not_updated.insert(id.clone(), json!({"type": "notFound"}));
+                    continue;
+                };
+
+                if let Some(seen) = patch.get("keywords/$seen") {
+                    email.is_read = seen.as_bool().unwrap_or(false);
+                }
+                if let Some(mailbox_ids) = patch.get("mailboxIds").and_then(|v| v.as_object()) {
+                    if let Some((target, _)) = mailbox_ids
+                        .iter()
+                        .find(|(_, v)| v.as_bool().unwrap_or(false))
+                    {
+                        email.mailbox_id = target.clone();
+                    }
+                }
+                updated.insert(id.clone(), Value::Null);
+            }
+        }
+
+        if let Some(destroy) = args.get("destroy").and_then(|v| v.as_array()) {
+            for idv in destroy {
+                let Some(id) = idv.as_str() else {
+                    continue;
+                };
+                if self.emails.remove(id).is_none() {
+                    not_destroyed.insert(id.to_string(), json!({"type": "notFound"}));
+                }
+            }
+        }
+
+        let mut resp = serde_json::Map::new();
+        resp.insert("accountId".to_string(), json!("account-001"));
+        resp.insert("oldState".to_string(), json!("estate-001"));
+        resp.insert("newState".to_string(), json!("estate-002"));
+        if !updated.is_empty() {
+            resp.insert("updated".to_string(), Value::Object(updated));
+        }
+        if !not_updated.is_empty() {
+            resp.insert("notUpdated".to_string(), Value::Object(not_updated));
+        }
+        if !not_destroyed.is_empty() {
+            resp.insert("notDestroyed".to_string(), Value::Object(not_destroyed));
+        }
+        Value::Object(resp)
+    }
+}
 
 pub struct MockJmapServer {
     port: u16,
@@ -17,13 +270,14 @@ impl MockJmapServer {
         let port = listener.local_addr().unwrap().port();
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_clone = shutdown.clone();
+        let state = Arc::new(Mutex::new(MockState::new()));
 
         listener
             .set_nonblocking(true)
             .expect("set_nonblocking on listener");
 
         let handle = thread::spawn(move || {
-            Self::serve(listener, shutdown_clone);
+            Self::serve(listener, shutdown_clone, state, port);
         });
 
         MockJmapServer {
@@ -37,16 +291,12 @@ impl MockJmapServer {
         format!("http://127.0.0.1:{}", self.port)
     }
 
-    #[allow(dead_code)]
-    pub fn shutdown(mut self) {
-        self.shutdown.store(true, Ordering::SeqCst);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
-    }
-
-    fn serve(listener: TcpListener, shutdown: Arc<AtomicBool>) {
-        let port = listener.local_addr().unwrap().port();
+    fn serve(
+        listener: TcpListener,
+        shutdown: Arc<AtomicBool>,
+        state: Arc<Mutex<MockState>>,
+        port: u16,
+    ) {
         while !shutdown.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((stream, _)) => {
@@ -56,27 +306,28 @@ impl MockJmapServer {
                     stream
                         .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                         .ok();
-                    Self::handle_connection(stream, port);
+                    Self::handle_connection(stream, port, &state);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(std::time::Duration::from_millis(10));
-                    continue;
                 }
                 Err(_) => break,
             }
         }
     }
 
-    fn handle_connection(mut stream: std::net::TcpStream, port: u16) {
+    fn handle_connection(
+        mut stream: std::net::TcpStream,
+        port: u16,
+        state: &Arc<Mutex<MockState>>,
+    ) {
         let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
 
-        // Read request line
         let mut request_line = String::new();
         if reader.read_line(&mut request_line).is_err() {
             return;
         }
 
-        // Read headers
         let mut content_length: usize = 0;
         loop {
             let mut header = String::new();
@@ -92,7 +343,6 @@ impl MockJmapServer {
                     content_length = len;
                 }
             }
-            // Also handle lowercase
             if let Some(val) = trimmed.strip_prefix("content-length:") {
                 if let Ok(len) = val.trim().parse() {
                     content_length = len;
@@ -100,7 +350,6 @@ impl MockJmapServer {
             }
         }
 
-        // Read body if present
         let body = if content_length > 0 {
             let mut buf = vec![0u8; content_length];
             if reader.read_exact(&mut buf).is_err() {
@@ -121,7 +370,7 @@ impl MockJmapServer {
         let (status, response_body) = if method == "GET" && path.contains("/.well-known/jmap") {
             Self::handle_session(port)
         } else if method == "POST" && path.contains("/api") {
-            Self::handle_api(&body)
+            Self::handle_api(&body, state)
         } else {
             (
                 "404 Not Found".to_string(),
@@ -155,11 +404,10 @@ impl MockJmapServer {
                 }
             }
         });
-        // Note: the apiUrl will be fixed up by the test harness writing the correct port in config
         ("200 OK".to_string(), session.to_string())
     }
 
-    fn handle_api(body: &str) -> (String, String) {
+    fn handle_api(body: &str, state: &Arc<Mutex<MockState>>) -> (String, String) {
         let request: Value = match serde_json::from_str(body) {
             Ok(v) => v,
             Err(_) => {
@@ -188,7 +436,7 @@ impl MockJmapServer {
                 _ => continue,
             };
             let method_name = arr[0].as_str().unwrap_or("");
-            let _args = &arr[1];
+            let args = &arr[1];
             let call_id = arr[2].as_str().unwrap_or("0");
 
             let response = match method_name {
@@ -202,15 +450,15 @@ impl MockJmapServer {
                                 "id": "mbox-inbox",
                                 "name": "INBOX",
                                 "role": "inbox",
-                                "totalEmails": 3,
-                                "unreadEmails": 1,
+                                "totalEmails": 4,
+                                "unreadEmails": 2,
                                 "sortOrder": 1
                             },
                             {
                                 "id": "mbox-archive",
                                 "name": "Archive",
                                 "role": "archive",
-                                "totalEmails": 100,
+                                "totalEmails": 1,
                                 "unreadEmails": 0,
                                 "sortOrder": 3
                             },
@@ -218,7 +466,7 @@ impl MockJmapServer {
                                 "id": "mbox-trash",
                                 "name": "Trash",
                                 "role": "trash",
-                                "totalEmails": 5,
+                                "totalEmails": 0,
                                 "unreadEmails": 0,
                                 "sortOrder": 4
                             }
@@ -227,64 +475,50 @@ impl MockJmapServer {
                     },
                     call_id
                 ]),
-                "Email/query" => json!([
-                    "Email/query",
-                    {
-                        "accountId": "account-001",
-                        "queryState": "qstate-001",
-                        "ids": ["email-001", "email-002", "email-003"],
-                        "position": 0,
-                        "total": 3
-                    },
-                    call_id
-                ]),
+                "Email/query" => {
+                    let filter = args.get("filter").cloned().unwrap_or_else(|| json!({}));
+                    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+                    let position =
+                        args.get("position").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let ids = {
+                        let guard = state.lock().expect("state lock");
+                        guard.query_email_ids(&filter, limit, position)
+                    };
+                    json!([
+                        "Email/query",
+                        {
+                            "accountId": "account-001",
+                            "queryState": "qstate-001",
+                            "ids": ids,
+                            "position": position,
+                            "total": null
+                        },
+                        call_id
+                    ])
+                }
                 "Email/get" => {
-                    let requested_ids = _args
+                    let requested_ids = args
                         .get("ids")
                         .and_then(|v| v.as_array())
                         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
                         .unwrap_or_default();
 
-                    let all_emails = vec![
-                        test_email(
-                            "email-001",
-                            "thread-001",
-                            "Alice <alice@example.com>",
-                            "Hello World",
-                            "This is the body of email 001.",
-                            "mbox-inbox",
-                            true,
-                        ),
-                        test_email(
-                            "email-002",
-                            "thread-002",
-                            "Bob <bob@example.com>",
-                            "Meeting Tomorrow",
-                            "Let's meet at 10am.",
-                            "mbox-inbox",
-                            false,
-                        ),
-                        test_email(
-                            "email-003",
-                            "thread-003",
-                            "Carol <carol@example.com>",
-                            "Project Update",
-                            "Here is the update.",
-                            "mbox-inbox",
-                            false,
-                        ),
-                    ];
-
-                    let list: Vec<Value> = if requested_ids.is_empty() {
-                        all_emails
-                    } else {
-                        all_emails
-                            .into_iter()
-                            .filter(|e| {
-                                let id = e.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                                requested_ids.contains(&id)
-                            })
-                            .collect()
+                    let list = {
+                        let guard = state.lock().expect("state lock");
+                        if requested_ids.is_empty() {
+                            guard
+                                .emails
+                                .values()
+                                .map(EmailRecord::to_jmap_email)
+                                .collect::<Vec<_>>()
+                        } else {
+                            requested_ids
+                                .into_iter()
+                                .filter_map(|id| {
+                                    guard.emails.get(id).map(EmailRecord::to_jmap_email)
+                                })
+                                .collect::<Vec<_>>()
+                        }
                     };
 
                     json!([
@@ -298,18 +532,13 @@ impl MockJmapServer {
                         call_id
                     ])
                 }
-                "Email/set" => json!([
-                    "Email/set",
-                    {
-                        "accountId": "account-001",
-                        "oldState": "estate-001",
-                        "newState": "estate-002",
-                        "updated": {
-                            "email-001": null
-                        }
-                    },
-                    call_id
-                ]),
+                "Email/set" => {
+                    let payload = {
+                        let mut guard = state.lock().expect("state lock");
+                        guard.apply_email_set(args)
+                    };
+                    json!(["Email/set", payload, call_id])
+                }
                 "Thread/get" => json!([
                     "Thread/get",
                     {
@@ -353,47 +582,4 @@ impl Drop for MockJmapServer {
             let _ = h.join();
         }
     }
-}
-
-fn test_email(
-    id: &str,
-    thread_id: &str,
-    from: &str,
-    subject: &str,
-    body_text: &str,
-    mailbox_id: &str,
-    is_read: bool,
-) -> Value {
-    let (name, email) = if let Some(idx) = from.find('<') {
-        let name = from[..idx].trim().to_string();
-        let email = from[idx + 1..].trim_end_matches('>').to_string();
-        (Some(name), Some(email))
-    } else {
-        (None, Some(from.to_string()))
-    };
-
-    let mut keywords = serde_json::Map::new();
-    if is_read {
-        keywords.insert("$seen".to_string(), json!(true));
-    }
-
-    json!({
-        "id": id,
-        "threadId": thread_id,
-        "from": [{"name": name, "email": email}],
-        "to": [{"name": "Test User", "email": "test@example.com"}],
-        "cc": null,
-        "replyTo": null,
-        "subject": subject,
-        "receivedAt": "2025-01-15T10:30:00Z",
-        "sentAt": "2025-01-15T10:30:00Z",
-        "preview": &body_text[..body_text.len().min(100)],
-        "textBody": [{"partId": "1"}],
-        "bodyValues": {"1": {"value": body_text, "isEncodingProblem": false, "isTruncated": false}},
-        "keywords": keywords,
-        "mailboxIds": {mailbox_id: true},
-        "messageId": [format!("<{}@example.com>", id)],
-        "references": null,
-        "attachments": []
-    })
 }

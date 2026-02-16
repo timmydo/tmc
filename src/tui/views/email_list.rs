@@ -118,6 +118,8 @@ impl EmailListView {
             page_size: self.page_size,
             position: 0,
             search_query: self.active_search.clone(),
+            received_after: None,
+            received_before: None,
         });
     }
 
@@ -146,6 +148,8 @@ impl EmailListView {
             page_size: self.page_size,
             position: self.next_query_position,
             search_query: self.active_search.clone(),
+            received_after: None,
+            received_before: None,
         }) {
             Ok(()) => true,
             Err(e) => {

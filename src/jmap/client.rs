@@ -350,25 +350,40 @@ impl JmapClient {
         limit: u32,
         position: u32,
         search_text: Option<&str>,
+        received_after: Option<&str>,
+        received_before: Option<&str>,
     ) -> Result<EmailQueryResult, JmapError> {
         log_info!(
-            "[JMAP] Email/query for mailbox: {} (limit: {}, position: {}, search: {:?})",
+            "[JMAP] Email/query for mailbox: {} (limit: {}, position: {}, search: {:?}, after: {:?}, before: {:?})",
             mailbox_id,
             limit,
             position,
-            search_text
+            search_text,
+            received_after,
+            received_before
         );
 
-        let filter = if let Some(text) = search_text {
+        let mut conditions = vec![json!({ "inMailbox": mailbox_id })];
+        if let Some(text) = search_text {
+            conditions.push(json!({ "text": text }));
+        }
+        if let Some(after) = received_after {
+            conditions.push(json!({ "after": after }));
+        }
+        if let Some(before) = received_before {
+            conditions.push(json!({ "before": before }));
+        }
+
+        let filter = if conditions.len() == 1 {
+            conditions
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| json!({ "inMailbox": mailbox_id }))
+        } else {
             json!({
                 "operator": "AND",
-                "conditions": [
-                    { "inMailbox": mailbox_id },
-                    { "text": text }
-                ]
+                "conditions": conditions
             })
-        } else {
-            json!({ "inMailbox": mailbox_id })
         };
 
         let request = JmapRequest {

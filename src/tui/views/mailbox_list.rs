@@ -362,6 +362,8 @@ impl View for MailboxListView {
                         page_size: self.page_size,
                         position: 0,
                         search_query: None,
+                        received_after: None,
+                        received_before: None,
                     });
                     ViewAction::Push(Box::new(view))
                 } else {
@@ -480,6 +482,8 @@ impl View for MailboxListView {
                     page_size: self.page_size,
                     position: 0,
                     search_query: None,
+                    received_after: None,
+                    received_before: None,
                 });
                 return Some(ViewAction::Push(Box::new(view)));
             }

@@ -369,6 +369,8 @@ fn main() {
     if args.iter().any(|a| a == "--cli") {
         let archive_folder = config.mail.archive_folder.clone();
         let deleted_folder = config.mail.deleted_folder.clone();
+        let archive_mailbox_id = config.mail.archive_mailbox_id.clone();
+        let deleted_mailbox_id = config.mail.deleted_mailbox_id.clone();
         let rules_mailbox_regex = config.mail.rules_mailbox_regex.clone();
         let my_email_regex = config.mail.my_email_regex.clone();
         cli::run_cli(
@@ -379,6 +381,8 @@ fn main() {
             my_email_regex,
             archive_folder,
             deleted_folder,
+            archive_mailbox_id,
+            deleted_mailbox_id,
         );
         std::process::exit(0);
     }

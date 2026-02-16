@@ -6,8 +6,32 @@ use crate::keybindings;
 use crate::rules::{self, CompiledRule};
 use regex::Regex;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::sync::{mpsc, Arc};
+
+#[derive(Clone, Copy)]
+enum TriageTarget {
+    Archive,
+    Trash,
+    Keep,
+}
+
+#[derive(Clone)]
+struct TriageItem {
+    id: String,
+    received_at: Option<String>,
+    from: Option<String>,
+    subject: Option<String>,
+    target: TriageTarget,
+    reason: String,
+    confidence: f32,
+}
+
+struct TriagePlan {
+    archive_ids: Vec<String>,
+    trash_ids: Vec<String>,
+}
 
 struct CliState {
     config: Config,
@@ -23,6 +47,10 @@ struct CliState {
     my_email_regex: Arc<Regex>,
     archive_folder: String,
     deleted_folder: String,
+    archive_mailbox_id: Option<String>,
+    deleted_mailbox_id: Option<String>,
+    next_plan_id: u64,
+    triage_plans: HashMap<String, TriagePlan>,
 }
 
 impl CliState {
@@ -47,8 +75,43 @@ impl CliState {
             .map_err(|_| "backend channel closed".to_string())
     }
 
-    fn resolve_folder_id(&self, folder_name: &str) -> Option<String> {
-        rules::resolve_mailbox_id(folder_name, &self.cached_mailboxes)
+    fn next_plan_id(&mut self) -> String {
+        self.next_plan_id += 1;
+        format!("plan-{}", self.next_plan_id)
+    }
+
+    fn refresh_mailboxes(&mut self, origin: &str) -> Result<(), String> {
+        self.send_cmd(BackendCommand::FetchMailboxes {
+            origin: origin.to_string(),
+        })?;
+        match self.recv_resp()? {
+            BackendResponse::Mailboxes(Ok(mailboxes)) => {
+                self.cached_mailboxes = mailboxes;
+                Ok(())
+            }
+            BackendResponse::Mailboxes(Err(e)) => Err(e),
+            _ => Err("unexpected response from backend".to_string()),
+        }
+    }
+
+    fn resolve_folder_id(
+        &mut self,
+        folder_name: &str,
+        preferred_id: Option<&str>,
+    ) -> Option<String> {
+        if let Some(id) = preferred_id {
+            return Some(id.to_string());
+        }
+        if self.cached_mailboxes.is_empty() {
+            let _ = self.refresh_mailboxes("cli:auto-cache");
+        }
+        if let Some(id) = rules::resolve_mailbox_id(folder_name, &self.cached_mailboxes) {
+            return Some(id);
+        }
+        if self.refresh_mailboxes("cli:refresh-resolve").is_ok() {
+            return rules::resolve_mailbox_id(folder_name, &self.cached_mailboxes);
+        }
+        None
     }
 }
 
@@ -173,9 +236,14 @@ fn dispatch(state: &mut CliState, input: &Value) -> Value {
         "flag" => cmd_flag(state, input),
         "unflag" => cmd_unflag(state, input),
         "move_email" => cmd_move_email(state, input),
+        "bulk_move" => cmd_bulk_move(state, input),
         "archive" => cmd_archive(state, input),
+        "bulk_archive" => cmd_bulk_archive(state, input),
         "delete_email" => cmd_delete_email(state, input),
+        "bulk_delete_email" => cmd_bulk_delete_email(state, input),
         "destroy" => cmd_destroy(state, input),
+        "triage_suggest" => cmd_triage_suggest(state, input),
+        "apply_triage_plan" => cmd_apply_triage_plan(state, input),
         "mark_mailbox_read" => cmd_mark_mailbox_read(state, input),
         "get_raw_headers" => cmd_get_raw_headers(state, input),
         "download_attachment" => cmd_download_attachment(state, input),
@@ -344,6 +412,14 @@ fn cmd_query_emails(state: &mut CliState, input: &Value) -> Value {
         .get("search")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let received_after = input
+        .get("received_after")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let received_before = input
+        .get("received_before")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     if let Err(e) = state.send_cmd(BackendCommand::QueryEmails {
         origin: "cli".to_string(),
@@ -351,6 +427,8 @@ fn cmd_query_emails(state: &mut CliState, input: &Value) -> Value {
         page_size: limit,
         position,
         search_query: search,
+        received_after,
+        received_before,
     }) {
         return err_response(&e);
     }
@@ -561,18 +639,82 @@ fn cmd_move_email(state: &mut CliState, input: &Value) -> Value {
     recv_mutation_response(state)
 }
 
+fn parse_ids(input: &Value) -> Result<Vec<String>, String> {
+    let ids = input
+        .get("ids")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "missing 'ids' field".to_string())?;
+    let mut out = Vec::with_capacity(ids.len());
+    for v in ids {
+        let id = v
+            .as_str()
+            .ok_or_else(|| "'ids' must be an array of strings".to_string())?;
+        out.push(id.to_string());
+    }
+    Ok(out)
+}
+
+fn mutate_many_move(state: &mut CliState, ids: &[String], target_mailbox_id: &str) -> Value {
+    let mut results = Vec::with_capacity(ids.len());
+    for id in ids {
+        let op_id = state.next_op_id();
+        let send_result = state.send_cmd(BackendCommand::MoveEmail {
+            op_id,
+            id: id.clone(),
+            to_mailbox_id: target_mailbox_id.to_string(),
+        });
+        if let Err(e) = send_result {
+            results.push(json!({"id": id, "ok": false, "error": e}));
+            continue;
+        }
+        match state.recv_resp() {
+            Ok(BackendResponse::EmailMutation { result, id, .. }) => match result {
+                Ok(()) => results.push(json!({"id": id, "ok": true})),
+                Err(e) => results.push(json!({"id": id, "ok": false, "error": e})),
+            },
+            Ok(_) => results.push(json!({"id": id, "ok": false, "error": "unexpected response"})),
+            Err(e) => results.push(json!({"id": id, "ok": false, "error": e})),
+        }
+    }
+    let success = results
+        .iter()
+        .filter(|r| r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false))
+        .count();
+    ok_response(json!({
+        "target_mailbox_id": target_mailbox_id,
+        "attempted": ids.len(),
+        "succeeded": success,
+        "failed": ids.len().saturating_sub(success),
+        "results": results
+    }))
+}
+
+fn cmd_bulk_move(state: &mut CliState, input: &Value) -> Value {
+    let ids = match parse_ids(input) {
+        Ok(ids) => ids,
+        Err(e) => return err_response(&e),
+    };
+    let to_mailbox_id = match input.get("to_mailbox_id").and_then(|v| v.as_str()) {
+        Some(id) => id.to_string(),
+        None => return err_response("missing 'to_mailbox_id' field"),
+    };
+    mutate_many_move(state, &ids, &to_mailbox_id)
+}
+
 fn cmd_archive(state: &mut CliState, input: &Value) -> Value {
     let id = match input.get("id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
         None => return err_response("missing 'id' field"),
     };
 
-    let archive_id = match state.resolve_folder_id(&state.archive_folder.clone()) {
+    let archive_folder = state.archive_folder.clone();
+    let archive_mailbox_id = state.archive_mailbox_id.clone();
+    let archive_id = match state.resolve_folder_id(&archive_folder, archive_mailbox_id.as_deref()) {
         Some(id) => id,
         None => {
             return err_response(&format!(
                 "cannot resolve archive folder '{}'",
-                state.archive_folder
+                archive_folder
             ))
         }
     };
@@ -590,18 +732,39 @@ fn cmd_archive(state: &mut CliState, input: &Value) -> Value {
     recv_mutation_response(state)
 }
 
+fn cmd_bulk_archive(state: &mut CliState, input: &Value) -> Value {
+    let ids = match parse_ids(input) {
+        Ok(ids) => ids,
+        Err(e) => return err_response(&e),
+    };
+    let archive_folder = state.archive_folder.clone();
+    let archive_mailbox_id = state.archive_mailbox_id.clone();
+    let archive_id = match state.resolve_folder_id(&archive_folder, archive_mailbox_id.as_deref()) {
+        Some(id) => id,
+        None => {
+            return err_response(&format!(
+                "cannot resolve archive folder '{}'",
+                archive_folder
+            ))
+        }
+    };
+    mutate_many_move(state, &ids, &archive_id)
+}
+
 fn cmd_delete_email(state: &mut CliState, input: &Value) -> Value {
     let id = match input.get("id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
         None => return err_response("missing 'id' field"),
     };
 
-    let deleted_id = match state.resolve_folder_id(&state.deleted_folder.clone()) {
+    let deleted_folder = state.deleted_folder.clone();
+    let deleted_mailbox_id = state.deleted_mailbox_id.clone();
+    let deleted_id = match state.resolve_folder_id(&deleted_folder, deleted_mailbox_id.as_deref()) {
         Some(id) => id,
         None => {
             return err_response(&format!(
                 "cannot resolve deleted folder '{}'",
-                state.deleted_folder
+                deleted_folder
             ))
         }
     };
@@ -617,6 +780,340 @@ fn cmd_delete_email(state: &mut CliState, input: &Value) -> Value {
     }
 
     recv_mutation_response(state)
+}
+
+fn cmd_bulk_delete_email(state: &mut CliState, input: &Value) -> Value {
+    let ids = match parse_ids(input) {
+        Ok(ids) => ids,
+        Err(e) => return err_response(&e),
+    };
+    let deleted_folder = state.deleted_folder.clone();
+    let deleted_mailbox_id = state.deleted_mailbox_id.clone();
+    let deleted_id = match state.resolve_folder_id(&deleted_folder, deleted_mailbox_id.as_deref()) {
+        Some(id) => id,
+        None => {
+            return err_response(&format!(
+                "cannot resolve deleted folder '{}'",
+                deleted_folder
+            ))
+        }
+    };
+    mutate_many_move(state, &ids, &deleted_id)
+}
+
+fn triage_from_rules(
+    state: &CliState,
+    emails: &[Email],
+) -> HashMap<String, (TriageTarget, String, f32)> {
+    let mut out = HashMap::new();
+    if state.rules.is_empty() {
+        return out;
+    }
+    let applications = rules::apply_rules(
+        &state.rules,
+        emails,
+        &state.cached_mailboxes,
+        &state.my_email_regex,
+    );
+    let mut by_name = HashMap::new();
+    for rule in state.rules.iter() {
+        by_name.insert(rule.name.as_str(), rule);
+    }
+    for app in applications {
+        let mut target = TriageTarget::Keep;
+        if let Some(rule) = by_name.get(app.rule_name.as_str()) {
+            if let Some(hint) = rule.triage_action {
+                target = match hint {
+                    rules::TriageHintActionDef::Archive => TriageTarget::Archive,
+                    rules::TriageHintActionDef::Trash => TriageTarget::Trash,
+                    rules::TriageHintActionDef::Keep => TriageTarget::Keep,
+                };
+            }
+        }
+        for action in &app.actions {
+            match action {
+                rules::Action::Delete => {
+                    target = TriageTarget::Trash;
+                    break;
+                }
+                rules::Action::Move { target: folder } => {
+                    let lowered = folder.to_ascii_lowercase();
+                    if lowered.contains("trash") || lowered.contains("deleted") {
+                        target = TriageTarget::Trash;
+                    } else if lowered.contains("archive") {
+                        target = TriageTarget::Archive;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !matches!(target, TriageTarget::Keep) {
+            let confidence = by_name
+                .get(app.rule_name.as_str())
+                .and_then(|r| r.triage_confidence)
+                .unwrap_or(0.95);
+            out.insert(
+                app.email_id,
+                (
+                    target,
+                    format!("matched rule '{}'", app.rule_name),
+                    confidence,
+                ),
+            );
+        }
+    }
+    out
+}
+
+fn triage_from_heuristics(email: &Email) -> (TriageTarget, String, f32) {
+    let from = email
+        .from
+        .as_ref()
+        .and_then(|f| f.first())
+        .and_then(|f| f.email.as_deref())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let subject = email.subject.as_deref().unwrap_or("").to_ascii_lowercase();
+
+    let trash_domains = [
+        "equityexcelloans.com",
+        "megastarfinancial.com",
+        "fastrefinow.com",
+        "homebridgerefi.com",
+        "homefinancerelief.com",
+        "communitymortgagehelp.com",
+        "bridgepointloans.com",
+        "cecilia.in",
+    ];
+    if trash_domains.iter().any(|d| from.contains(d)) {
+        return (
+            TriageTarget::Trash,
+            "known spam-like sender".to_string(),
+            0.92,
+        );
+    }
+    if subject.contains("lower your monthly payments")
+        || subject.contains("payment reduction")
+        || subject.contains("harp program")
+    {
+        return (
+            TriageTarget::Trash,
+            "mortgage/refi spam pattern".to_string(),
+            0.9,
+        );
+    }
+
+    let archive_domains = [
+        "delta.com",
+        "alaskaair.com",
+        "americanexpress.com",
+        "chase.com",
+        "bankofamerica.com",
+        "orders.icebreaker.com",
+        "ebay.com",
+        "collinstreet.com",
+        "hyatt.com",
+        "anthropic.com",
+        "accounts.google.com",
+        "ui.com",
+        "github.com",
+        "gitlab@redox-os.org",
+        "comcast.net",
+    ];
+    if archive_domains.iter().any(|d| from.contains(d)) {
+        return (
+            TriageTarget::Archive,
+            "transactional/notification sender".to_string(),
+            0.82,
+        );
+    }
+    if subject.contains("receipt")
+        || subject.contains("statement")
+        || subject.contains("security alert")
+        || subject.contains("shipment")
+        || subject.contains("order confirmed")
+        || subject.contains("dependabot")
+    {
+        return (
+            TriageTarget::Archive,
+            "transactional/notification subject".to_string(),
+            0.78,
+        );
+    }
+
+    (
+        TriageTarget::Keep,
+        "no archive/trash signal".to_string(),
+        0.4,
+    )
+}
+
+fn cmd_triage_suggest(state: &mut CliState, input: &Value) -> Value {
+    let mailbox_id = match input.get("mailbox_id").and_then(|v| v.as_str()) {
+        Some(id) => id.to_string(),
+        None => return err_response("missing 'mailbox_id' field"),
+    };
+    let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as u32;
+    let position = input.get("position").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let search = input
+        .get("search")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let received_after = input
+        .get("received_after")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let received_before = input
+        .get("received_before")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    if let Err(e) = state.send_cmd(BackendCommand::QueryEmails {
+        origin: "cli:triage".to_string(),
+        mailbox_id: mailbox_id.clone(),
+        page_size: limit,
+        position,
+        search_query: search,
+        received_after,
+        received_before,
+    }) {
+        return err_response(&e);
+    }
+
+    let emails = match state.recv_resp() {
+        Ok(BackendResponse::Emails {
+            emails: Ok(list), ..
+        }) => list,
+        Ok(BackendResponse::Emails { emails: Err(e), .. }) => return err_response(&e),
+        Ok(_) => return err_response("unexpected response from backend"),
+        Err(e) => return err_response(&e),
+    };
+
+    let rule_targets = triage_from_rules(state, &emails);
+    let mut archive = Vec::new();
+    let mut trash = Vec::new();
+    let mut keep = Vec::new();
+
+    for email in emails {
+        let (target, reason, confidence) = if let Some((t, r, c)) = rule_targets.get(&email.id) {
+            (*t, r.clone(), *c)
+        } else {
+            triage_from_heuristics(&email)
+        };
+        let from_email = email
+            .from
+            .as_ref()
+            .and_then(|f| f.first())
+            .and_then(|a| a.email.clone());
+        let item = TriageItem {
+            id: email.id.clone(),
+            received_at: email.received_at.clone(),
+            from: from_email,
+            subject: email.subject.clone(),
+            target,
+            reason,
+            confidence,
+        };
+        match item.target {
+            TriageTarget::Archive => archive.push(item),
+            TriageTarget::Trash => trash.push(item),
+            TriageTarget::Keep => keep.push(item),
+        }
+    }
+
+    let plan_id = state.next_plan_id();
+    let plan = TriagePlan {
+        archive_ids: archive.iter().map(|i| i.id.clone()).collect(),
+        trash_ids: trash.iter().map(|i| i.id.clone()).collect(),
+    };
+    state.triage_plans.insert(plan_id.clone(), plan);
+
+    let serialize_items = |items: &[TriageItem]| -> Vec<Value> {
+        items
+            .iter()
+            .map(|i| {
+                json!({
+                    "id": i.id,
+                    "received_at": i.received_at,
+                    "from": i.from,
+                    "subject": i.subject,
+                    "reason": i.reason,
+                    "confidence": i.confidence,
+                })
+            })
+            .collect()
+    };
+
+    ok_response(json!({
+        "plan_id": plan_id,
+        "mailbox_id": mailbox_id,
+        "archive": serialize_items(&archive),
+        "trash": serialize_items(&trash),
+        "keep": serialize_items(&keep),
+    }))
+}
+
+fn cmd_apply_triage_plan(state: &mut CliState, input: &Value) -> Value {
+    let (archive_ids, trash_ids) =
+        if let Some(plan_id) = input.get("plan_id").and_then(|v| v.as_str()) {
+            let Some(plan) = state.triage_plans.get(plan_id) else {
+                return err_response(&format!("unknown plan_id '{}'", plan_id));
+            };
+            (plan.archive_ids.clone(), plan.trash_ids.clone())
+        } else {
+            let archive_ids = match input.get("archive_ids").and_then(|v| v.as_array()) {
+                Some(v) => v
+                    .iter()
+                    .filter_map(|id| id.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>(),
+                None => Vec::new(),
+            };
+            let trash_ids = match input.get("trash_ids").and_then(|v| v.as_array()) {
+                Some(v) => v
+                    .iter()
+                    .filter_map(|id| id.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>(),
+                None => Vec::new(),
+            };
+            if archive_ids.is_empty() && trash_ids.is_empty() {
+                return err_response("provide 'plan_id' or non-empty archive_ids/trash_ids");
+            }
+            (archive_ids, trash_ids)
+        };
+
+    let archive_folder = state.archive_folder.clone();
+    let archive_mailbox_id = state.archive_mailbox_id.clone();
+    let archive_target =
+        match state.resolve_folder_id(&archive_folder, archive_mailbox_id.as_deref()) {
+            Some(id) => id,
+            None => {
+                return err_response(&format!(
+                    "cannot resolve archive folder '{}'",
+                    archive_folder
+                ))
+            }
+        };
+
+    let deleted_folder = state.deleted_folder.clone();
+    let deleted_mailbox_id = state.deleted_mailbox_id.clone();
+    let trash_target = match state.resolve_folder_id(&deleted_folder, deleted_mailbox_id.as_deref())
+    {
+        Some(id) => id,
+        None => {
+            return err_response(&format!(
+                "cannot resolve deleted folder '{}'",
+                deleted_folder
+            ))
+        }
+    };
+
+    let archive_resp = mutate_many_move(state, &archive_ids, &archive_target);
+    let trash_resp = mutate_many_move(state, &trash_ids, &trash_target);
+
+    ok_response(json!({
+        "archive": archive_resp,
+        "trash": trash_resp,
+    }))
 }
 
 fn cmd_destroy(state: &mut CliState, input: &Value) -> Value {
@@ -876,6 +1373,8 @@ pub fn run_cli(
     my_email_regex: String,
     archive_folder: String,
     deleted_folder: String,
+    archive_mailbox_id: Option<String>,
+    deleted_mailbox_id: Option<String>,
 ) {
     let rules_regex = Regex::new(&rules_mailbox_regex).expect("invalid rules_mailbox_regex");
     let email_regex = Regex::new(&my_email_regex).expect("invalid my_email_regex");
@@ -894,6 +1393,10 @@ pub fn run_cli(
         my_email_regex: Arc::new(email_regex),
         archive_folder,
         deleted_folder,
+        archive_mailbox_id,
+        deleted_mailbox_id,
+        next_plan_id: 0,
+        triage_plans: HashMap::new(),
     };
 
     let stdin = io::stdin();
@@ -980,7 +1483,7 @@ Email Query Commands
 --------------------
 query_emails: Query emails in a mailbox.
    > {{"command": "query_emails", "mailbox_id": "mbox-id", "limit": 50, "position": 0, "search": null}}
-   Optional: headers_only (bool), max_body_chars (int)
+   Optional: headers_only (bool), max_body_chars (int), received_after (RFC3339/date), received_before (RFC3339/date)
    < {{"ok": true, "emails": [...], "total": 100, "position": 0, "loaded": 50, "thread_counts": {{...}}}}
 
 get_email: Fetch a single email with full body.
@@ -1010,9 +1513,22 @@ mark_unread:  {{"command": "mark_unread", "id": "email-id"}}
 flag:         {{"command": "flag", "id": "email-id"}}
 unflag:       {{"command": "unflag", "id": "email-id"}}
 move_email:   {{"command": "move_email", "id": "email-id", "to_mailbox_id": "mbox-id"}}
+bulk_move:    {{"command": "bulk_move", "ids": ["id1", "id2"], "to_mailbox_id": "mbox-id"}}
 archive:      {{"command": "archive", "id": "email-id"}}  (uses configured archive folder)
+bulk_archive: {{"command": "bulk_archive", "ids": ["id1", "id2"]}}
 delete_email: {{"command": "delete_email", "id": "email-id"}}  (uses configured deleted folder)
+bulk_delete_email: {{"command": "bulk_delete_email", "ids": ["id1", "id2"]}}
 destroy:      {{"command": "destroy", "ids": ["id1", "id2"]}}  (permanently delete)
+
+Triage Automation
+-----------------
+triage_suggest: Dry-run proposal for archive/trash/keep with reasons.
+   > {{"command": "triage_suggest", "mailbox_id": "mbox-id", "limit": 200, "received_after": "2025-12-01", "received_before": "2026-01-01"}}
+   < {{"ok": true, "plan_id": "plan-1", "archive": [...], "trash": [...], "keep": [...]}}
+
+apply_triage_plan: Apply a saved plan safely, or explicit approved IDs.
+   > {{"command": "apply_triage_plan", "plan_id": "plan-1"}}
+   > {{"command": "apply_triage_plan", "archive_ids": ["id1"], "trash_ids": ["id2"]}}
 
 All mutations return: {{"ok": true, "op_id": N, "id": "...", "action": "..."}}
 

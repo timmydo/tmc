@@ -23,6 +23,23 @@ pub struct RuleDef {
     #[serde(rename = "match")]
     pub match_condition: ConditionDef,
     pub actions: ActionsDef,
+    #[serde(default)]
+    pub triage: Option<TriageHintDef>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TriageHintDef {
+    pub action: TriageHintActionDef,
+    #[serde(default)]
+    pub confidence: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriageHintActionDef {
+    Archive,
+    Trash,
+    Keep,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,6 +76,8 @@ pub struct CompiledRule {
     pub skip_if_to_me: bool,
     pub actions: Vec<Action>,
     pub condition: CompiledCondition,
+    pub triage_action: Option<TriageHintActionDef>,
+    pub triage_confidence: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +156,12 @@ fn compile_rule(def: RuleDef) -> Result<CompiledRule, String> {
         skip_if_to_me: def.skip_if_to_me.unwrap_or(false),
         actions,
         condition,
+        triage_action: def.triage.as_ref().map(|t| match t.action {
+            TriageHintActionDef::Archive => TriageHintActionDef::Archive,
+            TriageHintActionDef::Trash => TriageHintActionDef::Trash,
+            TriageHintActionDef::Keep => TriageHintActionDef::Keep,
+        }),
+        triage_confidence: def.triage.and_then(|t| t.confidence),
     })
 }
 

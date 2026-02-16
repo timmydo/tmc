@@ -38,6 +38,8 @@ pub struct RetentionPolicyConfig {
 pub struct MailConfig {
     pub archive_folder: String,
     pub deleted_folder: String,
+    pub archive_mailbox_id: Option<String>,
+    pub deleted_mailbox_id: Option<String>,
     pub rules_mailbox_regex: String,
     pub my_email_regex: String,
     pub retention_policies: Vec<RetentionPolicyConfig>,
@@ -104,6 +106,10 @@ struct RawMailConfig {
     archive_folder: String,
     #[serde(default = "default_deleted_folder")]
     deleted_folder: String,
+    #[serde(default)]
+    archive_mailbox_id: Option<String>,
+    #[serde(default)]
+    deleted_mailbox_id: Option<String>,
     #[serde(default = "default_rules_mailbox_regex")]
     rules_mailbox_regex: String,
     #[serde(default = "default_my_email_regex")]
@@ -115,6 +121,8 @@ impl Default for RawMailConfig {
         Self {
             archive_folder: default_archive_folder(),
             deleted_folder: default_deleted_folder(),
+            archive_mailbox_id: None,
+            deleted_mailbox_id: None,
             rules_mailbox_regex: default_rules_mailbox_regex(),
             my_email_regex: default_my_email_regex(),
         }
@@ -262,6 +270,8 @@ impl Config {
             mail: MailConfig {
                 archive_folder: raw.mail.archive_folder,
                 deleted_folder: raw.mail.deleted_folder,
+                archive_mailbox_id: raw.mail.archive_mailbox_id,
+                deleted_mailbox_id: raw.mail.deleted_mailbox_id,
                 rules_mailbox_regex: raw.mail.rules_mailbox_regex,
                 my_email_regex: raw.mail.my_email_regex,
                 retention_policies,
@@ -420,5 +430,31 @@ password_command = "pass show email/example.com"
         assert_eq!(config.mail.retention_policies.len(), 2);
         assert_eq!(config.mail.retention_policies[0].name, "archive");
         assert_eq!(config.mail.retention_policies[1].days, 30);
+    }
+
+    #[test]
+    fn test_mailbox_id_overrides() {
+        let config = Config::parse(
+            r#"
+[mail]
+archive_mailbox_id = "mbox-archive"
+deleted_mailbox_id = "mbox-trash"
+
+[jmap]
+well_known_url = "https://mx.example.com/.well-known/jmap"
+username = "user@example.com"
+password_command = "pass show email/example.com"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.mail.archive_mailbox_id.as_deref(),
+            Some("mbox-archive")
+        );
+        assert_eq!(
+            config.mail.deleted_mailbox_id.as_deref(),
+            Some("mbox-trash")
+        );
     }
 }
