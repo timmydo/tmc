@@ -65,9 +65,11 @@ impl MailboxListView {
         }
     }
 
-    fn request_refresh(&mut self) {
+    fn request_refresh(&mut self, origin: &str) {
         self.loading = true;
-        let _ = self.cmd_tx.send(BackendCommand::FetchMailboxes);
+        let _ = self.cmd_tx.send(BackendCommand::FetchMailboxes {
+            origin: origin.to_string(),
+        });
     }
 
     fn next_account_name(&self) -> Option<String> {
@@ -355,6 +357,7 @@ impl View for MailboxListView {
                     );
                     // Send the query command
                     let _ = self.cmd_tx.send(BackendCommand::QueryEmails {
+                        origin: "mailbox_list.open_enter".to_string(),
                         mailbox_id: mailbox.id.clone(),
                         page_size: self.page_size,
                         position: 0,
@@ -366,7 +369,7 @@ impl View for MailboxListView {
                 }
             }
             Key::Char('g') => {
-                self.request_refresh();
+                self.request_refresh("mailbox_list.key_g");
                 ViewAction::Continue
             }
             Key::Char('+') => {
@@ -454,6 +457,7 @@ impl View for MailboxListView {
                     self.deleted_folder.clone(),
                 );
                 let _ = self.cmd_tx.send(BackendCommand::QueryEmails {
+                    origin: "mailbox_list.open_click".to_string(),
                     mailbox_id: mailbox.id.clone(),
                     page_size: self.page_size,
                     position: 0,
@@ -509,7 +513,7 @@ impl View for MailboxListView {
                 match result {
                     Ok(()) => {
                         self.status_message = Some(format!("Created folder '{}'", name));
-                        self.request_refresh();
+                        self.request_refresh("mailbox_list.mailbox_created");
                     }
                     Err(e) => {
                         self.status_message =
@@ -522,7 +526,7 @@ impl View for MailboxListView {
                 match result {
                     Ok(()) => {
                         self.status_message = Some(format!("Deleted folder '{}'", name));
-                        self.request_refresh();
+                        self.request_refresh("mailbox_list.mailbox_deleted");
                     }
                     Err(e) => {
                         self.status_message =
@@ -544,7 +548,7 @@ impl View for MailboxListView {
                                 exec.failed_batches.len()
                             ));
                         }
-                        self.request_refresh();
+                        self.request_refresh("mailbox_list.retention_executed");
                     }
                     Err(e) => {
                         self.status_message = Some(format!("Retention expiry failed: {}", e));
@@ -559,7 +563,7 @@ impl View for MailboxListView {
                         EmailMutationAction::MarkRead | EmailMutationAction::MarkUnread
                     )
                 {
-                    self.request_refresh();
+                    self.request_refresh("mailbox_list.email_mutation_followup");
                     true
                 } else {
                     false
@@ -567,7 +571,7 @@ impl View for MailboxListView {
             }
             BackendResponse::ThreadMarkedRead { result, .. } => {
                 if result.is_ok() {
-                    self.request_refresh();
+                    self.request_refresh("mailbox_list.thread_marked_read");
                     true
                 } else {
                     false
@@ -581,7 +585,7 @@ impl View for MailboxListView {
         if self.loading || self.create_mode || self.delete_confirm_mode {
             return false;
         }
-        self.request_refresh();
+        self.request_refresh("mailbox_list.periodic_sync");
         true
     }
 }

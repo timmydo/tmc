@@ -37,6 +37,7 @@ pub struct MailConfig {
     pub archive_folder: String,
     pub deleted_folder: String,
     pub rules_mailbox_regex: String,
+    pub my_email_regex: String,
     pub retention_policies: Vec<RetentionPolicyConfig>,
 }
 
@@ -130,7 +131,12 @@ fn parse_value(raw_value: &str, line_num: usize) -> Result<String, ConfigError> 
 }
 
 const KNOWN_UI_KEYS: &[&str] = &["editor", "page_size", "mouse", "sync_interval_secs"];
-const KNOWN_MAIL_KEYS: &[&str] = &["archive_folder", "deleted_folder", "rules_mailbox_regex"];
+const KNOWN_MAIL_KEYS: &[&str] = &[
+    "archive_folder",
+    "deleted_folder",
+    "rules_mailbox_regex",
+    "my_email_regex",
+];
 const KNOWN_JMAP_KEYS: &[&str] = &["well_known_url", "username", "password_command"];
 const KNOWN_ACCOUNT_KEYS: &[&str] = &["well_known_url", "username", "password_command"];
 const KNOWN_RETENTION_KEYS: &[&str] = &["folder", "days"];
@@ -149,6 +155,7 @@ impl Config {
         let mut archive_folder = "archive".to_string();
         let mut deleted_folder = "trash".to_string();
         let mut rules_mailbox_regex = "^INBOX$".to_string();
+        let mut my_email_regex = "^$".to_string();
 
         // Legacy [jmap] fields
         let mut jmap_well_known_url = None;
@@ -283,6 +290,15 @@ impl Config {
                                 ))
                             })?;
                             rules_mailbox_regex = value;
+                        }
+                        "my_email_regex" => {
+                            Regex::new(&value).map_err(|e| {
+                                ConfigError::Parse(format!(
+                                    "line {}: invalid regex '{}' for my_email_regex: {}",
+                                    line_num, value, e
+                                ))
+                            })?;
+                            my_email_regex = value;
                         }
                         _ => {}
                     }
@@ -423,6 +439,7 @@ impl Config {
                 archive_folder,
                 deleted_folder,
                 rules_mailbox_regex,
+                my_email_regex,
                 retention_policies: final_retention_policies,
             },
         })
@@ -475,6 +492,7 @@ page_size = 25
         assert_eq!(config.mail.archive_folder, "archive");
         assert_eq!(config.mail.deleted_folder, "trash");
         assert_eq!(config.mail.rules_mailbox_regex, "^INBOX$");
+        assert_eq!(config.mail.my_email_regex, "^$");
         assert!(config.mail.retention_policies.is_empty());
     }
 
@@ -507,6 +525,7 @@ password_command = "pass show email/work.com"
         assert_eq!(config.mail.archive_folder, "archive");
         assert_eq!(config.mail.deleted_folder, "trash");
         assert_eq!(config.mail.rules_mailbox_regex, "^INBOX$");
+        assert_eq!(config.mail.my_email_regex, "^$");
     }
 
     #[test]
@@ -800,6 +819,7 @@ password_command = "pass show email"
 archive_folder = "Archive"
 deleted_folder = "Trash"
 rules_mailbox_regex = "^INBOX$"
+my_email_regex = "(?i)^(me@example\\.com)$"
 
 [jmap]
 well_known_url = "https://mx.example.com/.well-known/jmap"
@@ -810,6 +830,7 @@ password_command = "pass show email/example.com"
         assert_eq!(config.mail.archive_folder, "Archive");
         assert_eq!(config.mail.deleted_folder, "Trash");
         assert_eq!(config.mail.rules_mailbox_regex, "^INBOX$");
+        assert_eq!(config.mail.my_email_regex, "(?i)^(me@example\\.com)$");
     }
 
     #[test]
@@ -817,10 +838,12 @@ password_command = "pass show email/example.com"
         let toml = &jmap_config("");
         let config = Config::parse(toml).unwrap();
         assert_eq!(config.mail.rules_mailbox_regex, "^INBOX$");
+        assert_eq!(config.mail.my_email_regex, "^$");
 
         let toml = &jmap_config("[mail]\nrules_mailbox_regex = \"^(INBOX|Alerts)$\"");
         let config = Config::parse(toml).unwrap();
         assert_eq!(config.mail.rules_mailbox_regex, "^(INBOX|Alerts)$");
+        assert_eq!(config.mail.my_email_regex, "^$");
     }
 
     #[test]
@@ -831,6 +854,23 @@ password_command = "pass show email/example.com"
             ConfigError::Parse(msg) => {
                 assert!(msg.contains("invalid regex"), "got: {}", msg);
                 assert!(msg.contains("rules_mailbox_regex"), "got: {}", msg);
+            }
+            _ => panic!("expected Parse error"),
+        }
+    }
+
+    #[test]
+    fn test_my_email_regex_override_and_validation() {
+        let toml = &jmap_config("[mail]\nmy_email_regex = \"(?i)timmy@\"");
+        let config = Config::parse(toml).unwrap();
+        assert_eq!(config.mail.my_email_regex, "(?i)timmy@");
+
+        let toml = &jmap_config("[mail]\nmy_email_regex = \"(\"");
+        let err = Config::parse(toml).unwrap_err();
+        match err {
+            ConfigError::Parse(msg) => {
+                assert!(msg.contains("invalid regex"), "got: {}", msg);
+                assert!(msg.contains("my_email_regex"), "got: {}", msg);
             }
             _ => panic!("expected Parse error"),
         }

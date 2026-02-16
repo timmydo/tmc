@@ -106,13 +106,14 @@ impl EmailListView {
         }
     }
 
-    fn request_refresh(&mut self) {
+    fn request_refresh(&mut self, origin: &str) {
         self.next_query_position = 0;
         self.last_loaded_count = 0;
         self.loading = true;
         self.loading_more = false;
         self.scroll_offset = 0;
         let _ = self.cmd_tx.send(BackendCommand::QueryEmails {
+            origin: origin.to_string(),
             mailbox_id: self.mailbox_id.clone(),
             page_size: self.page_size,
             position: 0,
@@ -140,6 +141,7 @@ impl EmailListView {
         self.loading = true;
         self.loading_more = true;
         match self.cmd_tx.send(BackendCommand::QueryEmails {
+            origin: "email_list.load_more".to_string(),
             mailbox_id: self.mailbox_id.clone(),
             page_size: self.page_size,
             position: self.next_query_position,
@@ -702,7 +704,7 @@ impl View for EmailListView {
                         self.active_search = Some(self.search_input.clone());
                     }
                     self.search_input.clear();
-                    self.request_refresh();
+                    self.request_refresh("email_list.search_submit");
                 }
                 Key::Escape => {
                     self.search_mode = false;
@@ -843,7 +845,7 @@ impl View for EmailListView {
             Key::Enter => self.open_selected().unwrap_or(ViewAction::Continue),
             Key::AltEnter => self.open_thread_list().unwrap_or(ViewAction::Continue),
             Key::Char('g') => {
-                self.request_refresh();
+                self.request_refresh("email_list.key_g");
                 ViewAction::Continue
             }
             Key::Char('R') => {
@@ -865,6 +867,7 @@ impl View for EmailListView {
                 let mailbox_name = self.mailbox_name.clone();
                 let loaded_email_ids = self.emails.iter().map(|e| e.id.clone()).collect();
                 if let Err(e) = self.cmd_tx.send(BackendCommand::PreviewRulesForMailbox {
+                    origin: "email_list.key_e_dry_run".to_string(),
                     mailbox_id,
                     mailbox_name: mailbox_name.clone(),
                     loaded_email_ids,
@@ -881,6 +884,7 @@ impl View for EmailListView {
                 let mailbox_name = self.mailbox_name.clone();
                 let loaded_email_ids = self.emails.iter().map(|e| e.id.clone()).collect();
                 if let Err(e) = self.cmd_tx.send(BackendCommand::RunRulesForMailbox {
+                    origin: "email_list.key_E_run_rules".to_string(),
                     mailbox_id,
                     mailbox_name: mailbox_name.clone(),
                     loaded_email_ids,
@@ -997,7 +1001,7 @@ impl View for EmailListView {
             Key::Escape => {
                 if self.active_search.is_some() {
                     self.active_search = None;
-                    self.request_refresh();
+                    self.request_refresh("email_list.clear_search_escape");
                 }
                 ViewAction::Continue
             }
@@ -1111,7 +1115,7 @@ impl View for EmailListView {
                     match result {
                         Ok(()) => {
                             if let PendingWriteOp::Seen { .. } = pending {
-                                self.request_refresh();
+                                self.request_refresh("email_list.seen_mutation_followup");
                             }
                         }
                         Err(e) => {
@@ -1150,7 +1154,7 @@ impl View for EmailListView {
             }
             BackendResponse::ThreadMarkedRead { result, .. } => {
                 if result.is_ok() {
-                    self.request_refresh();
+                    self.request_refresh("email_list.thread_marked_read");
                     true
                 } else {
                     false
@@ -1186,7 +1190,7 @@ impl View for EmailListView {
                             "Rules run in '{}': scanned {}, matched {}, actions {}",
                             mailbox_name, summary.scanned, summary.matched_rules, summary.actions
                         ));
-                        self.request_refresh();
+                        self.request_refresh("email_list.rules_run_followup");
                     }
                     Err(e) => {
                         self.status_message = Some(format!("Rules run failed: {}", e));
@@ -1202,7 +1206,7 @@ impl View for EmailListView {
         if self.loading || self.move_mode || self.search_mode {
             return false;
         }
-        self.request_refresh();
+        self.request_refresh("email_list.periodic_sync");
         true
     }
 }

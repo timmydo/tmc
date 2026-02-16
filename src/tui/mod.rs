@@ -32,6 +32,7 @@ pub fn run(
     archive_folder: String,
     deleted_folder: String,
     rules_mailbox_regex: String,
+    my_email_regex: String,
     retention_policies: Vec<RetentionPolicyConfig>,
     rules: Vec<CompiledRule>,
     custom_headers: Vec<String>,
@@ -48,11 +49,18 @@ pub fn run(
                 ),
             )
         })?);
+    let my_email_regex = std::sync::Arc::new(Regex::new(&my_email_regex).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid mail.my_email_regex '{}': {}", my_email_regex, e),
+        )
+    })?);
     let (mut cmd_tx, mut resp_rx) = backend::spawn(
         client,
         rules.clone(),
         custom_headers.clone(),
         rules_mailbox_regex.clone(),
+        my_email_regex.clone(),
     );
     let mut term = Terminal::new(mouse)?;
 
@@ -69,7 +77,9 @@ pub fn run(
         deleted_folder.clone(),
         retention_policies.clone(),
     );
-    let _ = cmd_tx.send(BackendCommand::FetchMailboxes);
+    let _ = cmd_tx.send(BackendCommand::FetchMailboxes {
+        origin: "startup".to_string(),
+    });
 
     let mut stack = ViewStack::new(Box::new(mailbox_view));
     let sync_interval = sync_interval_secs.map(Duration::from_secs);
@@ -184,6 +194,7 @@ pub fn run(
                                     rules.clone(),
                                     custom_headers.clone(),
                                     rules_mailbox_regex.clone(),
+                                    my_email_regex.clone(),
                                 );
                                 cmd_tx = new_cmd_tx;
                                 resp_rx = new_resp_rx;
@@ -198,7 +209,9 @@ pub fn run(
                                     deleted_folder.clone(),
                                     retention_policies.clone(),
                                 );
-                                let _ = cmd_tx.send(BackendCommand::FetchMailboxes);
+                                let _ = cmd_tx.send(BackendCommand::FetchMailboxes {
+                                    origin: "switch_account".to_string(),
+                                });
                                 stack = ViewStack::new(Box::new(mailbox_view));
                                 last_periodic_sync = Instant::now();
                             }

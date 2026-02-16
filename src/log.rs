@@ -31,6 +31,27 @@ pub fn init() {
     }
 }
 
+/// Truncate the log file to empty. Safe to call before startup.
+pub fn clear() -> Result<(), String> {
+    let path = log_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create log dir: {}", e))?;
+    }
+
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(|e| format!("Failed to clear log file {}: {}", path.display(), e))?;
+
+    if let Ok(mut guard) = LOG_FILE.lock() {
+        *guard = None;
+    }
+
+    Ok(())
+}
+
 /// Write a log line to the file.
 pub fn write_log(level: &str, msg: &str) {
     let ts = timestamp();

@@ -18,6 +18,8 @@ pub struct RuleDef {
     pub name: String,
     #[serde(default)]
     pub continue_processing: Option<bool>,
+    #[serde(default)]
+    pub skip_if_to_me: Option<bool>,
     #[serde(rename = "match")]
     pub match_condition: ConditionDef,
     pub actions: ActionsDef,
@@ -54,6 +56,7 @@ pub struct ActionsDef {
 pub struct CompiledRule {
     pub name: String,
     pub continue_processing: bool,
+    pub skip_if_to_me: bool,
     pub actions: Vec<Action>,
     pub condition: CompiledCondition,
 }
@@ -108,6 +111,10 @@ pub fn format_rules_for_display(rules: &[CompiledRule]) -> String {
             }
         ));
         out.push_str(&format!(
+            "  Skip if not to me: {}\n",
+            if rule.skip_if_to_me { "yes" } else { "no" }
+        ));
+        out.push_str(&format!(
             "  Match: {}\n",
             format_condition_for_display(&rule.condition)
         ));
@@ -127,6 +134,7 @@ fn compile_rule(def: RuleDef) -> Result<CompiledRule, String> {
     Ok(CompiledRule {
         name: def.name,
         continue_processing: def.continue_processing.unwrap_or(false),
+        skip_if_to_me: def.skip_if_to_me.unwrap_or(false),
         actions,
         condition,
     })
@@ -334,6 +342,7 @@ pub fn apply_rules(
     rules: &[CompiledRule],
     emails: &[Email],
     mailboxes: &[Mailbox],
+    my_email_regex: &Regex,
 ) -> Vec<RuleApplication> {
     let mut applications = Vec::new();
     let mut total_actions = 0usize;
@@ -347,6 +356,15 @@ pub fn apply_rules(
     for email in emails {
         log_debug!("[Rules] Evaluating email {}", email.id);
         for rule in rules {
+            if rule.skip_if_to_me && !is_email_to_me(email, my_email_regex) {
+                log_debug!(
+                    "[Rules] Email {} skipping rule '{}' because skip_if_to_me=true and To/Cc does not match '{}'",
+                    email.id,
+                    rule.name,
+                    my_email_regex.as_str()
+                );
+                continue;
+            }
             let matched = evaluate_condition(&rule.condition, email);
             log_debug!(
                 "[Rules] Email {} rule '{}' matched={}",
@@ -408,6 +426,23 @@ pub fn apply_rules(
         total_actions
     );
     applications
+}
+
+fn is_email_to_me(email: &Email, my_email_regex: &Regex) -> bool {
+    let mut combined = String::new();
+    if let Some(to) = format_addresses(&email.to) {
+        combined.push_str(&to);
+    }
+    if let Some(cc) = format_addresses(&email.cc) {
+        if !combined.is_empty() {
+            combined.push_str(", ");
+        }
+        combined.push_str(&cc);
+    }
+    if combined.is_empty() {
+        return false;
+    }
+    my_email_regex.is_match(&combined)
 }
 
 fn filter_noop_actions(actions: &[Action], email: &Email, mailboxes: &[Mailbox]) -> Vec<Action> {
@@ -764,7 +799,9 @@ mark_read = true
         let config: RulesConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.rule.len(), 2);
         assert_eq!(config.rule[0].continue_processing, Some(true));
+        assert_eq!(config.rule[0].skip_if_to_me, None);
         assert_eq!(config.rule[1].continue_processing, None);
+        assert_eq!(config.rule[1].skip_if_to_me, None);
     }
 
     #[test]
@@ -1036,7 +1073,8 @@ flag = true
             .unwrap();
 
         let email = make_email("e1");
-        let apps = apply_rules(&rules, &[email], &[]);
+        let my_email_regex = Regex::new(".*").unwrap();
+        let apps = apply_rules(&rules, &[email], &[], &my_email_regex);
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].rule_name, "first");
     }
@@ -1070,10 +1108,67 @@ mark_read = true
             .unwrap();
 
         let email = make_email("e1");
-        let apps = apply_rules(&rules, &[email], &[]);
+        let my_email_regex = Regex::new(".*").unwrap();
+        let apps = apply_rules(&rules, &[email], &[], &my_email_regex);
         assert_eq!(apps.len(), 2);
         assert_eq!(apps[0].rule_name, "first");
         assert_eq!(apps[1].rule_name, "second");
+    }
+
+    #[test]
+    fn test_skip_if_to_me_requires_to_or_cc_match() {
+        let toml_str = r#"
+[[rule]]
+name = "match if addressed to me"
+skip_if_to_me = true
+[rule.match]
+header = "From"
+regex = "alice@"
+[rule.actions]
+flag = true
+"#;
+        let config: RulesConfig = toml::from_str(toml_str).unwrap();
+        let rules: Vec<CompiledRule> = config
+            .rule
+            .into_iter()
+            .map(compile_rule)
+            .collect::<Result<_, _>>()
+            .unwrap();
+
+        let email = make_email("e1");
+        let my_email_regex = Regex::new("(?i)me@example\\.com").unwrap();
+        let apps = apply_rules(&rules, &[email], &[], &my_email_regex);
+        assert!(apps.is_empty());
+    }
+
+    #[test]
+    fn test_skip_if_to_me_matches_to_or_cc() {
+        let toml_str = r#"
+[[rule]]
+name = "match if addressed to me"
+skip_if_to_me = true
+[rule.match]
+header = "From"
+regex = "alice@"
+[rule.actions]
+flag = true
+"#;
+        let config: RulesConfig = toml::from_str(toml_str).unwrap();
+        let rules: Vec<CompiledRule> = config
+            .rule
+            .into_iter()
+            .map(compile_rule)
+            .collect::<Result<_, _>>()
+            .unwrap();
+
+        let mut email = make_email("e1");
+        email.to = Some(vec![EmailAddress {
+            name: Some("Timmy".to_string()),
+            email: Some("me@example.com".to_string()),
+        }]);
+        let my_email_regex = Regex::new("(?i)me@example\\.com").unwrap();
+        let apps = apply_rules(&rules, &[email], &[], &my_email_regex);
+        assert_eq!(apps.len(), 1);
     }
 
     #[test]

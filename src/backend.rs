@@ -10,7 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Commands sent from the UI thread to the backend thread.
 pub enum BackendCommand {
-    FetchMailboxes,
+    FetchMailboxes {
+        origin: String,
+    },
     CreateMailbox {
         name: String,
     },
@@ -19,6 +21,7 @@ pub enum BackendCommand {
         name: String,
     },
     QueryEmails {
+        origin: String,
         mailbox_id: String,
         page_size: u32,
         position: u32,
@@ -83,11 +86,13 @@ pub enum BackendCommand {
         policies: Vec<RetentionPolicyConfig>,
     },
     PreviewRulesForMailbox {
+        origin: String,
         mailbox_id: String,
         mailbox_name: String,
         loaded_email_ids: Vec<String>,
     },
     RunRulesForMailbox {
+        origin: String,
         mailbox_id: String,
         mailbox_name: String,
         loaded_email_ids: Vec<String>,
@@ -224,6 +229,7 @@ pub fn spawn(
     rules: Arc<Vec<CompiledRule>>,
     custom_headers: Arc<Vec<String>>,
     rules_mailbox_regex: Arc<Regex>,
+    my_email_regex: Arc<Regex>,
 ) -> (
     mpsc::Sender<BackendCommand>,
     mpsc::Receiver<BackendResponse>,
@@ -239,6 +245,7 @@ pub fn spawn(
             rules,
             custom_headers,
             rules_mailbox_regex,
+            my_email_regex,
         );
     });
 
@@ -252,12 +259,20 @@ fn backend_loop(
     rules: Arc<Vec<CompiledRule>>,
     custom_headers: Arc<Vec<String>>,
     rules_mailbox_regex: Arc<Regex>,
+    my_email_regex: Arc<Regex>,
 ) {
     let mut cached_mailboxes: Vec<Mailbox> = Vec::new();
+    let mut command_seq: u64 = 0;
 
     while let Ok(cmd) = cmd_rx.recv() {
+        command_seq = command_seq.wrapping_add(1);
         match cmd {
-            BackendCommand::FetchMailboxes => {
+            BackendCommand::FetchMailboxes { origin } => {
+                log_info!(
+                    "[Backend] cmd#{} FetchMailboxes origin='{}'",
+                    command_seq,
+                    origin
+                );
                 let result = client.get_mailboxes().map_err(|e| e.to_string());
                 if let Ok(ref mailboxes) = result {
                     cached_mailboxes = mailboxes.clone();
@@ -283,11 +298,21 @@ fn backend_loop(
                 let _ = resp_tx.send(BackendResponse::MailboxDeleted { name, result });
             }
             BackendCommand::QueryEmails {
+                origin,
                 mailbox_id,
                 page_size,
                 position,
                 search_query,
             } => {
+                log_info!(
+                    "[Backend] cmd#{} QueryEmails origin='{}' mailbox_id='{}' page_size={} position={} search={:?}",
+                    command_seq,
+                    origin,
+                    mailbox_id,
+                    page_size,
+                    position,
+                    search_query
+                );
                 let result = (|| {
                     let query = client
                         .query_emails(&mailbox_id, page_size, position, search_query.as_deref())
@@ -309,13 +334,18 @@ fn backend_loop(
                             .map(|m| m.name.as_str())
                             .unwrap_or("");
                         if rules_mailbox_regex.is_match(mailbox_name) {
-                            let applications =
-                                rules::apply_rules(&rules, &emails, &cached_mailboxes);
+                            let applications = rules::apply_rules(
+                                &rules,
+                                &emails,
+                                &cached_mailboxes,
+                                &my_email_regex,
+                            );
                             if !applications.is_empty() {
                                 log_info!(
-                                    "[Rules] Applying {} rule action(s) to fetched emails in mailbox '{}'",
+                                    "[Rules] Applying {} rule action(s) to fetched emails in mailbox '{}' (query origin='{}')",
                                     applications.len(),
-                                    mailbox_name
+                                    mailbox_name,
+                                    origin
                                 );
                                 rules::execute_rule_actions(
                                     &applications,
@@ -590,15 +620,24 @@ fn backend_loop(
                 let _ = resp_tx.send(BackendResponse::RetentionExecuted { result });
             }
             BackendCommand::PreviewRulesForMailbox {
+                origin,
                 mailbox_id,
                 mailbox_name,
                 loaded_email_ids,
             } => {
+                log_info!(
+                    "[Backend] cmd#{} PreviewRulesForMailbox origin='{}' mailbox='{}' loaded_email_ids={}",
+                    command_seq,
+                    origin,
+                    mailbox_name,
+                    loaded_email_ids.len()
+                );
                 let result = preview_rules_for_mailbox(
                     &client,
                     &cached_mailboxes,
                     &rules,
                     &custom_headers,
+                    &my_email_regex,
                     &loaded_email_ids,
                 );
                 let _ = resp_tx.send(BackendResponse::RulesDryRun {
@@ -608,15 +647,24 @@ fn backend_loop(
                 });
             }
             BackendCommand::RunRulesForMailbox {
+                origin,
                 mailbox_id,
                 mailbox_name,
                 loaded_email_ids,
             } => {
+                log_info!(
+                    "[Backend] cmd#{} RunRulesForMailbox origin='{}' mailbox='{}' loaded_email_ids={}",
+                    command_seq,
+                    origin,
+                    mailbox_name,
+                    loaded_email_ids.len()
+                );
                 let result = run_rules_for_mailbox(
                     &client,
                     &cached_mailboxes,
                     &rules,
                     &custom_headers,
+                    &my_email_regex,
                     &loaded_email_ids,
                 );
                 let _ = resp_tx.send(BackendResponse::RulesRun {
@@ -661,6 +709,7 @@ fn run_rules_for_mailbox(
     mailboxes: &[Mailbox],
     rules: &[CompiledRule],
     custom_headers: &[String],
+    my_email_regex: &Regex,
     loaded_email_ids: &[String],
 ) -> Result<RulesRunResult, String> {
     if rules.is_empty() || loaded_email_ids.is_empty() {
@@ -673,7 +722,7 @@ fn run_rules_for_mailbox(
 
     let emails = fetch_emails_chunked(client, loaded_email_ids, custom_headers)?;
     let scanned = emails.len();
-    let applications = rules::apply_rules(rules, &emails, mailboxes);
+    let applications = rules::apply_rules(rules, &emails, mailboxes, my_email_regex);
     let matched_rules = applications.len();
     let actions = applications.iter().map(|a| a.actions.len()).sum::<usize>();
     if !applications.is_empty() {
@@ -692,6 +741,7 @@ fn preview_rules_for_mailbox(
     mailboxes: &[Mailbox],
     rules: &[CompiledRule],
     custom_headers: &[String],
+    my_email_regex: &Regex,
     loaded_email_ids: &[String],
 ) -> Result<RulesDryRunResult, String> {
     if rules.is_empty() || loaded_email_ids.is_empty() {
@@ -707,7 +757,7 @@ fn preview_rules_for_mailbox(
     let scanned = emails.len();
     let mut entries = Vec::new();
     let email_by_id: HashMap<String, &Email> = emails.iter().map(|e| (e.id.clone(), e)).collect();
-    let applications = rules::apply_rules(rules, &emails, mailboxes);
+    let applications = rules::apply_rules(rules, &emails, mailboxes, my_email_regex);
     let matched_rules = applications.len();
     let actions = applications.iter().map(|a| a.actions.len()).sum::<usize>();
 

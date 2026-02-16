@@ -124,6 +124,7 @@ sync_interval_secs = 60   # optional: background sync interval (default 60, 0 = 
 archive_folder = "Archive"  # optional: target folder for 'a' archive action (default "archive")
 deleted_folder = "Trash"    # optional: target folder for 'd' delete action (default "trash")
 rules_mailbox_regex = "^INBOX$"  # optional: auto-run rules only when mailbox name matches (default "^INBOX$")
+my_email_regex = "(?i)(timmy@example\\.com|me@work\\.com)" # optional: your addresses used by rules skip_if_to_me (default "^$")
 
 [retention.archive]
 folder = "Archive"
@@ -151,6 +152,7 @@ Rules:
 - Quoted strings support \", \\, \n, \t escapes.
 - `archive_folder` and `deleted_folder` are mailbox targets for `a` and `d` in list views.
 - `rules_mailbox_regex` controls which mailbox names auto-run rules on refresh/fetch; default is `^INBOX$`.
+- `my_email_regex` is matched against combined To/Cc and used by rules with `skip_if_to_me = true`.
 - `[retention.NAME]` sections are optional folder retention policies used by `x` (preview) and `X` (expire) in mailbox view.
 - Retention policy fields:
   - `folder` (required): mailbox name, role, or path (e.g. "INBOX/Alerts")
@@ -178,6 +180,7 @@ Here is the format:
 # Simple rule: match a header with a regex, apply actions
 [[rule]]
 name = "mark newsletters read"
+skip_if_to_me = true
 [rule.match]
 header = "From"
 regex = "newsletter@"
@@ -236,6 +239,7 @@ Available actions:
 Conditions support: header/regex, all = [...], any = [...], not = {{...}}
 
 By default, only the first matching rule applies per email. Set `continue_processing = true` to allow subsequent rules to also match.
+Set `skip_if_to_me = true` to only apply a rule when `mail.my_email_regex` matches To or Cc.
 
 Please ask me what kinds of emails I receive and how I want them organized, then generate a rules file.
 "#,
@@ -256,14 +260,22 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        eprintln!("Usage: tmc [--log] [--print-rules] [--prompt=TOPIC]");
+        eprintln!("Usage: tmc [--clear-log] [--log] [--print-rules] [--prompt=TOPIC]");
         eprintln!();
         eprintln!("Options:");
+        eprintln!("  --clear-log      Truncate the log file at startup");
         eprintln!("  --log            View the log file in $PAGER");
         eprintln!("  --print-rules    Parse and print rules.toml");
         eprintln!("  --prompt=TOPIC   Print an AI-friendly prompt (config, rules)");
         eprintln!("  --help           Show this help");
         std::process::exit(0);
+    }
+
+    if args.iter().any(|a| a == "--clear-log") {
+        if let Err(e) = log::clear() {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
     }
 
     if args.iter().any(|a| a == "--log") {
@@ -367,6 +379,7 @@ fn main() {
         config.mail.archive_folder,
         config.mail.deleted_folder,
         config.mail.rules_mailbox_regex,
+        config.mail.my_email_regex,
         config.mail.retention_policies,
         compiled_rules,
         custom_headers,
