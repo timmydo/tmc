@@ -389,7 +389,7 @@ pub fn all_keybindings() -> Vec<KeyBinding> {
         },
         KeyBinding {
             view: "email_view",
-            key: "a",
+            key: "A",
             action: "attachment",
             description: "Download/open attachment",
         },
@@ -416,6 +416,24 @@ pub fn all_keybindings() -> Vec<KeyBinding> {
             key: "D",
             action: "destroy",
             description: "Expire now (deleted folder only)",
+        },
+        KeyBinding {
+            view: "email_view",
+            key: "a",
+            action: "archive",
+            description: "Archive message",
+        },
+        KeyBinding {
+            view: "email_view",
+            key: "d",
+            action: "delete",
+            description: "Delete message (move to trash)",
+        },
+        KeyBinding {
+            view: "email_view",
+            key: "m",
+            action: "move",
+            description: "Move to mailbox (interactive picker)",
         },
     ]
 }

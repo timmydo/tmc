@@ -298,6 +298,9 @@ impl EmailListView {
                 thread_id,
                 subject,
                 can_expire_now,
+                self.mailboxes.clone(),
+                self.archive_folder.clone(),
+                self.deleted_folder.clone(),
             );
             Some(ViewAction::Push(Box::new(view)))
         } else {
@@ -344,6 +347,9 @@ impl EmailListView {
             self.from_address.clone(),
             email_id.clone(),
             self.is_in_deleted_folder(),
+            self.mailboxes.clone(),
+            self.archive_folder.clone(),
+            self.deleted_folder.clone(),
         );
         let _ = self.cmd_tx.send(BackendCommand::GetEmail {
             id: email_id.clone(),

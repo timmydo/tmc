@@ -1,6 +1,7 @@
 use crate::backend::{BackendCommand, BackendResponse, EmailMutationAction};
 use crate::compose;
-use crate::jmap::types::Email;
+use crate::jmap::types::{Email, Mailbox};
+use crate::rules;
 use crate::tui::input::Key;
 use crate::tui::screen::Terminal;
 use crate::tui::views::help::HelpView;
@@ -98,6 +99,11 @@ pub struct EmailView {
     raw_headers_loading: bool,
     thread_id: Option<String>,
     thread_emails: Vec<Email>,
+    mailboxes: Vec<Mailbox>,
+    archive_folder: String,
+    deleted_folder: String,
+    move_mode: bool,
+    move_cursor: usize,
 }
 
 impl EmailView {
@@ -106,6 +112,9 @@ impl EmailView {
         from_address: String,
         email_id: String,
         can_expire_now: bool,
+        mailboxes: Vec<Mailbox>,
+        archive_folder: String,
+        deleted_folder: String,
     ) -> Self {
         EmailView {
             cmd_tx,
@@ -130,6 +139,11 @@ impl EmailView {
             raw_headers_loading: false,
             thread_id: None,
             thread_emails: Vec::new(),
+            mailboxes,
+            archive_folder,
+            deleted_folder,
+            move_mode: false,
+            move_cursor: 0,
         }
     }
 
@@ -139,6 +153,9 @@ impl EmailView {
         thread_id: String,
         _subject: String,
         can_expire_now: bool,
+        mailboxes: Vec<Mailbox>,
+        archive_folder: String,
+        deleted_folder: String,
     ) -> Self {
         let _ = cmd_tx.send(BackendCommand::QueryThreadEmails {
             thread_id: thread_id.clone(),
@@ -166,6 +183,11 @@ impl EmailView {
             raw_headers_loading: false,
             thread_id: Some(thread_id),
             thread_emails: Vec::new(),
+            mailboxes,
+            archive_folder,
+            deleted_folder,
+            move_mode: false,
+            move_cursor: 0,
         }
     }
 
@@ -230,7 +252,7 @@ impl EmailView {
                     lines.push(format!("  [{}] {} ({}, {})", i + 1, name, type_str, size));
                     kinds.push(LineKind::Body);
                 }
-                lines.push("  Press 'a' then 1-9 to download/open".to_string());
+                lines.push("  Press 'A' then 1-9 to download/open".to_string());
                 kinds.push(LineKind::Body);
             }
         }
@@ -390,6 +412,64 @@ impl EmailView {
         }
     }
 
+    fn move_to_folder(&mut self, folder: &str, action_label: &str) -> ViewAction {
+        let Some(target_id) = rules::resolve_mailbox_id(folder, &self.mailboxes) else {
+            self.status_message = Some(format!(
+                "{} failed: could not resolve folder '{}'",
+                action_label, folder
+            ));
+            return ViewAction::Continue;
+        };
+
+        let op_id = self.next_op_id();
+        let send_result = if let Some(thread_id) = &self.thread_id {
+            self.cmd_tx.send(BackendCommand::MoveThread {
+                op_id,
+                thread_id: thread_id.clone(),
+                to_mailbox_id: target_id,
+            })
+        } else {
+            self.cmd_tx.send(BackendCommand::MoveEmail {
+                op_id,
+                id: self.email_id.clone(),
+                to_mailbox_id: target_id,
+            })
+        };
+
+        match send_result {
+            Ok(()) => ViewAction::Pop,
+            Err(e) => {
+                self.status_message = Some(format!("{} failed: {}", action_label, e));
+                ViewAction::Continue
+            }
+        }
+    }
+
+    fn move_to_mailbox_id(&mut self, target_id: String) -> ViewAction {
+        let op_id = self.next_op_id();
+        let send_result = if let Some(thread_id) = &self.thread_id {
+            self.cmd_tx.send(BackendCommand::MoveThread {
+                op_id,
+                thread_id: thread_id.clone(),
+                to_mailbox_id: target_id,
+            })
+        } else {
+            self.cmd_tx.send(BackendCommand::MoveEmail {
+                op_id,
+                id: self.email_id.clone(),
+                to_mailbox_id: target_id,
+            })
+        };
+
+        match send_result {
+            Ok(()) => ViewAction::Pop,
+            Err(e) => {
+                self.status_message = Some(format!("Move failed: {}", e));
+                ViewAction::Continue
+            }
+        }
+    }
+
     fn expire_now(&mut self) -> ViewAction {
         if !self.can_expire_now {
             self.status_message =
@@ -458,6 +538,58 @@ impl View for EmailView {
                 term.write_str(" ")?;
             }
             term.reset_attr()?;
+            return term.flush();
+        }
+
+        if self.move_mode {
+            term.move_to(1, 1)?;
+            term.set_bold()?;
+            term.write_truncated("Move to mailbox:", term.cols)?;
+            term.reset_attr()?;
+
+            let max_items = (term.rows as usize).saturating_sub(3);
+            let scroll_offset = if self.move_cursor >= max_items {
+                self.move_cursor - max_items + 1
+            } else {
+                0
+            };
+
+            for (i, mailbox) in self
+                .mailboxes
+                .iter()
+                .skip(scroll_offset)
+                .enumerate()
+                .take(max_items)
+            {
+                let row = 2 + i as u16;
+                term.move_to(row, 1)?;
+
+                let display_idx = scroll_offset + i;
+                let line = format!("  {}", mailbox.name);
+
+                if display_idx == self.move_cursor {
+                    term.set_reverse()?;
+                }
+
+                term.write_truncated(&line, term.cols)?;
+                term.reset_attr()?;
+            }
+
+            // Status bar
+            term.move_to(term.rows, 1)?;
+            term.set_reverse()?;
+            let status = format!(
+                " {}/{} | n/p:navigate RET:move Esc:cancel",
+                self.move_cursor + 1,
+                self.mailboxes.len()
+            );
+            term.write_truncated(&status, term.cols)?;
+            let remaining = (term.cols as usize).saturating_sub(status.len());
+            for _ in 0..remaining {
+                term.write_str(" ")?;
+            }
+            term.reset_attr()?;
+
             return term.flush();
         }
 
@@ -535,13 +667,13 @@ impl View for EmailView {
             )
         } else {
             let att_hint = if self.attachment_count() > 0 {
-                " a:attach"
+                " A:attach"
             } else {
                 ""
             };
             let expire_hint = if self.can_expire_now { " D:expire" } else { "" };
             format!(
-                " line {}/{} | q:back n/j:down p/k:up r:reply R:reply-all F:forward{}{} ?:help",
+                " line {}/{} | q:back n/j:down p/k:up r:reply R:reply-all F:forward{}{} a:archive d:delete m:move ?:help",
                 self.scroll + 1,
                 total_lines,
                 att_hint,
@@ -572,6 +704,35 @@ impl View for EmailView {
                 self.download_attachment(index);
             } else {
                 self.status_message = Some("Cancelled".to_string());
+            }
+            return ViewAction::Continue;
+        }
+
+        // Move mode: mailbox picker
+        if self.move_mode {
+            match key {
+                Key::Escape | Key::Char('q') => {
+                    self.move_mode = false;
+                }
+                Key::Char('n') | Key::Char('j') | Key::Down | Key::ScrollDown => {
+                    if !self.mailboxes.is_empty() && self.move_cursor + 1 < self.mailboxes.len() {
+                        self.move_cursor += 1;
+                    }
+                }
+                Key::Char('p') | Key::Char('k') | Key::Up | Key::ScrollUp => {
+                    if self.move_cursor > 0 {
+                        self.move_cursor -= 1;
+                    }
+                }
+                Key::Enter => {
+                    if let Some(target_id) =
+                        self.mailboxes.get(self.move_cursor).map(|m| m.id.clone())
+                    {
+                        self.move_mode = false;
+                        return self.move_to_mailbox_id(target_id);
+                    }
+                }
+                _ => {}
             }
             return ViewAction::Continue;
         }
@@ -671,6 +832,21 @@ impl View for EmailView {
             }
             Key::Char('D') => self.expire_now(),
             Key::Char('a') => {
+                let target = self.archive_folder.clone();
+                self.move_to_folder(&target, "Archive")
+            }
+            Key::Char('d') => {
+                let target = self.deleted_folder.clone();
+                self.move_to_folder(&target, "Delete")
+            }
+            Key::Char('m') => {
+                if !self.mailboxes.is_empty() {
+                    self.move_mode = true;
+                    self.move_cursor = 0;
+                }
+                ViewAction::Continue
+            }
+            Key::Char('A') => {
                 let count = self.attachment_count();
                 if count == 0 {
                     self.status_message = Some("No attachments".to_string());

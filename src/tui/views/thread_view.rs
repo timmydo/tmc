@@ -182,6 +182,9 @@ impl ThreadView {
             self.from_address.clone(),
             email_id.clone(),
             self.can_expire_now,
+            self.mailboxes.clone(),
+            self.archive_folder.clone(),
+            self.deleted_folder.clone(),
         );
         let _ = self.cmd_tx.send(BackendCommand::GetEmail {
             id: email_id.clone(),
