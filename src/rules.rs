@@ -702,6 +702,7 @@ mod tests {
             sent_at: None,
             preview: None,
             text_body: None,
+            html_body: None,
             body_values: HashMap::new(),
             keywords: HashMap::new(),
             mailbox_ids: HashMap::new(),

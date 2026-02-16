@@ -71,6 +71,56 @@ fn wrap_line(s: &str, max_width: usize) -> Vec<&str> {
     result
 }
 
+/// Convert HTML to terminal-formatted text with ANSI escape codes for
+/// bold, underline, color, etc. using html2text's rich rendering mode.
+fn html_to_terminal(html: &str) -> String {
+    use html2text::render::RichAnnotation;
+
+    html2text::from_read_coloured(html.as_bytes(), 80, |annotations, text| {
+        let mut prefix = String::new();
+        let mut suffix = String::new();
+        for ann in annotations {
+            match ann {
+                RichAnnotation::Strong => {
+                    prefix.push_str("\x1b[1m");
+                    suffix.push_str("\x1b[22m");
+                }
+                RichAnnotation::Emphasis => {
+                    prefix.push_str("\x1b[3m");
+                    suffix.push_str("\x1b[23m");
+                }
+                RichAnnotation::Strikeout => {
+                    prefix.push_str("\x1b[9m");
+                    suffix.push_str("\x1b[29m");
+                }
+                RichAnnotation::Code | RichAnnotation::Preformat(_) => {
+                    prefix.push_str("\x1b[2m");
+                    suffix.push_str("\x1b[22m");
+                }
+                RichAnnotation::Link(url) => {
+                    // Show link URL after text in dim
+                    suffix.push_str(&format!(" \x1b[2m[{}]\x1b[22m", url));
+                }
+                RichAnnotation::Image(src) => {
+                    suffix.push_str(&format!(" \x1b[2m[img: {}]\x1b[22m", src));
+                }
+                RichAnnotation::Colour(c) => {
+                    prefix.push_str(&format!("\x1b[38;2;{};{};{}m", c.r, c.g, c.b));
+                    suffix.push_str("\x1b[39m");
+                }
+                RichAnnotation::BgColour(c) => {
+                    prefix.push_str(&format!("\x1b[48;2;{};{};{}m", c.r, c.g, c.b));
+                    suffix.push_str("\x1b[49m");
+                }
+                RichAnnotation::Default => {}
+                _ => {}
+            }
+        }
+        format!("{}{}{}", prefix, text, suffix)
+    })
+    .unwrap_or_else(|_| html.to_string())
+}
+
 enum PendingWriteOp {
     Flag { old_flagged: bool },
     Seen { old_seen: bool },
@@ -304,6 +354,13 @@ impl EmailView {
             for part in text_body {
                 if let Some(value) = email.body_values.get(&part.part_id) {
                     return value.value.clone();
+                }
+            }
+        }
+        if let Some(ref html_body) = email.html_body {
+            for part in html_body {
+                if let Some(value) = email.body_values.get(&part.part_id) {
+                    return html_to_terminal(&value.value);
                 }
             }
         }

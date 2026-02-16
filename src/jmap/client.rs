@@ -488,10 +488,11 @@ impl JmapClient {
                     "ids": ids,
                     "properties": [
                         "id", "threadId", "from", "to", "cc", "subject",
-                        "receivedAt", "preview", "textBody", "bodyValues", "keywords",
+                        "receivedAt", "preview", "textBody", "htmlBody", "bodyValues", "keywords",
                         "mailboxIds", "attachments"
                     ],
-                    "fetchTextBodyValues": true
+                    "fetchTextBodyValues": true,
+                    "fetchHTMLBodyValues": true
                 }),
                 "0".to_string(),
             )],
@@ -540,6 +541,7 @@ impl JmapClient {
             "receivedAt",
             "preview",
             "textBody",
+            "htmlBody",
             "bodyValues",
             "keywords",
             "mailboxIds",
@@ -557,7 +559,8 @@ impl JmapClient {
                     "accountId": self.account_id,
                     "ids": ids,
                     "properties": properties,
-                    "fetchTextBodyValues": true
+                    "fetchTextBodyValues": true,
+                    "fetchHTMLBodyValues": true
                 }),
                 "0".to_string(),
             )],
@@ -661,10 +664,11 @@ impl JmapClient {
                     "ids": [id],
                     "properties": [
                         "id", "from", "to", "cc", "replyTo", "subject",
-                        "receivedAt", "sentAt", "textBody", "bodyValues",
+                        "receivedAt", "sentAt", "textBody", "htmlBody", "bodyValues",
                         "messageId", "references"
                     ],
-                    "fetchTextBodyValues": true
+                    "fetchTextBodyValues": true,
+                    "fetchHTMLBodyValues": true
                 }),
                 "0".to_string(),
             )],

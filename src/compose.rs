@@ -194,7 +194,19 @@ pub(crate) fn extract_body_text(email: &crate::jmap::types::Email) -> String {
             }
         }
     }
+    if let Some(ref html_body) = email.html_body {
+        for part in html_body {
+            if let Some(value) = email.body_values.get(&part.part_id) {
+                return html_to_plain(&value.value);
+            }
+        }
+    }
     email.preview.as_deref().unwrap_or("(no body)").to_string()
+}
+
+/// Convert HTML to plain text (no ANSI formatting). Used for drafts and CLI.
+fn html_to_plain(html: &str) -> String {
+    html2text::from_read(html.as_bytes(), 80).unwrap_or_else(|_| html.to_string())
 }
 
 /// Write content to a temp file with restrictive permissions (0600).
@@ -249,6 +261,7 @@ mod tests {
             sent_at: Some("2024-01-01T00:00:00Z".to_string()),
             preview: Some("Preview text".to_string()),
             text_body: None,
+            html_body: None,
             body_values: HashMap::new(),
             keywords: HashMap::new(),
             mailbox_ids: HashMap::new(),
@@ -295,6 +308,7 @@ mod tests {
             sent_at: Some("2024-01-01T00:00:00Z".to_string()),
             preview: Some("Preview text".to_string()),
             text_body: None,
+            html_body: None,
             body_values: HashMap::new(),
             keywords: HashMap::new(),
             mailbox_ids: HashMap::new(),
@@ -337,6 +351,7 @@ mod tests {
             sent_at: None,
             preview: Some("body".to_string()),
             text_body: None,
+            html_body: None,
             body_values: HashMap::new(),
             keywords: HashMap::new(),
             mailbox_ids: HashMap::new(),

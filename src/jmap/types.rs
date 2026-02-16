@@ -146,6 +146,8 @@ pub struct Email {
     #[serde(default)]
     pub text_body: Option<Vec<BodyPart>>,
     #[serde(default)]
+    pub html_body: Option<Vec<BodyPart>>,
+    #[serde(default)]
     pub body_values: HashMap<String, BodyValue>,
     #[serde(default)]
     pub keywords: HashMap<String, bool>,
