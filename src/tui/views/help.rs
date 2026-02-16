@@ -46,6 +46,7 @@ impl HelpView {
             "  g           Refresh".to_string(),
             "  a           Archive selected email/thread".to_string(),
             "  d           Move selected email/thread to deleted folder".to_string(),
+            "  D           Expire selected email/thread now (deleted folder only)".to_string(),
             "  f           Toggle flagged".to_string(),
             "  u           Toggle read/unread".to_string(),
             "  m           Move to folder".to_string(),
@@ -66,6 +67,7 @@ impl HelpView {
             "  g           Refresh".to_string(),
             "  a           Archive selected email".to_string(),
             "  d           Move selected email to deleted folder".to_string(),
+            "  D           Expire selected email now (deleted folder only)".to_string(),
             "  f           Toggle flagged".to_string(),
             "  u           Toggle read/unread".to_string(),
             "  PgDn        Page down".to_string(),
@@ -89,6 +91,7 @@ impl HelpView {
             "  v           Toggle raw headers (DKIM, Received, etc)".to_string(),
             "  f           Toggle flagged".to_string(),
             "  u           Toggle read/unread".to_string(),
+            "  D           Expire now (deleted folder only)".to_string(),
             String::new(),
         ];
 

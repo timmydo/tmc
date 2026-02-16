@@ -52,6 +52,14 @@ pub enum BackendCommand {
         thread_id: String,
         to_mailbox_id: String,
     },
+    DestroyEmail {
+        op_id: u64,
+        id: String,
+    },
+    DestroyThread {
+        op_id: u64,
+        thread_id: String,
+    },
     QueryThreadEmails {
         thread_id: String,
     },
@@ -162,6 +170,7 @@ pub enum EmailMutationAction {
     MarkUnread,
     SetFlagged(bool),
     Move,
+    Destroy,
 }
 
 /// Spawn the backend thread. Returns the command sender and response receiver.
@@ -412,6 +421,39 @@ fn backend_loop(
                     op_id,
                     id: thread_id,
                     action: EmailMutationAction::Move,
+                    result,
+                });
+            }
+            BackendCommand::DestroyEmail { op_id, id } => {
+                let ids = vec![id.clone()];
+                let result = client.destroy_emails(&ids).map_err(|e| {
+                    let msg = e.to_string();
+                    log_warn!("Failed to destroy email {}: {}", id, msg);
+                    msg
+                });
+                let _ = resp_tx.send(BackendResponse::EmailMutation {
+                    op_id,
+                    id,
+                    action: EmailMutationAction::Destroy,
+                    result,
+                });
+            }
+            BackendCommand::DestroyThread { op_id, thread_id } => {
+                let result = (|| {
+                    let emails = client
+                        .query_thread_emails(&thread_id)
+                        .map_err(|e| e.to_string())?;
+                    let ids: Vec<String> = emails.into_iter().map(|e| e.id).collect();
+                    client.destroy_emails(&ids).map_err(|e| e.to_string())
+                })()
+                .map_err(|msg| {
+                    log_warn!("Failed to destroy thread {}: {}", thread_id, msg);
+                    msg
+                });
+                let _ = resp_tx.send(BackendResponse::EmailMutation {
+                    op_id,
+                    id: thread_id,
+                    action: EmailMutationAction::Destroy,
                     result,
                 });
             }

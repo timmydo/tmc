@@ -270,6 +270,7 @@ impl EmailListView {
             .get_thread_counts(email)
             .map(|(_, total)| total)
             .unwrap_or(1);
+        let can_expire_now = self.is_in_deleted_folder();
 
         if thread_total > 1 {
             // Open concatenated thread reading view
@@ -283,6 +284,7 @@ impl EmailListView {
                 self.from_address.clone(),
                 thread_id,
                 subject,
+                can_expire_now,
             );
             Some(ViewAction::Push(Box::new(view)))
         } else {
@@ -296,6 +298,7 @@ impl EmailListView {
             .get_thread_counts(email)
             .map(|(_, total)| total)
             .unwrap_or(1);
+        let can_expire_now = self.is_in_deleted_folder();
 
         if thread_total > 1 {
             let thread_id = email.thread_id.clone().unwrap_or_default();
@@ -311,6 +314,7 @@ impl EmailListView {
                 self.mailboxes.clone(),
                 self.archive_folder.clone(),
                 self.deleted_folder.clone(),
+                can_expire_now,
             );
             Some(ViewAction::Push(Box::new(view)))
         } else {
@@ -326,6 +330,7 @@ impl EmailListView {
             self.cmd_tx.clone(),
             self.from_address.clone(),
             email_id.clone(),
+            self.is_in_deleted_folder(),
         );
         let _ = self.cmd_tx.send(BackendCommand::GetEmail {
             id: email_id.clone(),
@@ -373,6 +378,14 @@ impl EmailListView {
         } else if self.cursor >= self.scroll_offset + max_items {
             self.scroll_offset = self.cursor - max_items + 1;
         }
+    }
+
+    fn is_in_deleted_folder(&self) -> bool {
+        if self.mailbox_name.eq_ignore_ascii_case(&self.deleted_folder) {
+            return true;
+        }
+        rules::resolve_mailbox_id(&self.deleted_folder, &self.mailboxes)
+            .is_some_and(|id| id == self.mailbox_id)
     }
 
     fn move_selected_to_folder(&mut self, folder: &str, action_label: &str) {
@@ -438,6 +451,59 @@ impl EmailListView {
                     from_index,
                 },
                 action_label,
+                e.to_string(),
+            );
+        }
+    }
+
+    fn expire_selected_now(&mut self) {
+        let Some(email) = self.emails.get(self.cursor).cloned() else {
+            return;
+        };
+        let thread_total = self
+            .get_thread_counts(&email)
+            .map(|(_, total)| total)
+            .unwrap_or(1);
+        let op_id = self.next_op_id();
+        let from_index = self.cursor;
+        self.pending_write_ops.insert(
+            op_id,
+            PendingWriteOp::Move {
+                email: Box::new(email.clone()),
+                from_index,
+            },
+        );
+        let send_result = if thread_total > 1 {
+            if let Some(thread_id) = email.thread_id.clone() {
+                self.cmd_tx
+                    .send(BackendCommand::DestroyThread { op_id, thread_id })
+            } else {
+                self.cmd_tx.send(BackendCommand::DestroyEmail {
+                    op_id,
+                    id: email.id.clone(),
+                })
+            }
+        } else {
+            self.cmd_tx.send(BackendCommand::DestroyEmail {
+                op_id,
+                id: email.id.clone(),
+            })
+        };
+        self.emails.remove(from_index);
+        if self.cursor >= self.emails.len() && self.cursor > 0 {
+            self.cursor -= 1;
+        }
+        if let Some(ref mut total) = self.total {
+            *total = total.saturating_sub(1);
+        }
+        if let Err(e) = send_result {
+            self.record_send_failure(
+                op_id,
+                PendingWriteOp::Move {
+                    email: Box::new(email),
+                    from_index,
+                },
+                "Expire",
                 e.to_string(),
             );
         }
@@ -587,10 +653,16 @@ impl View for EmailListView {
                 ""
             };
             let load_more_hint = if self.can_load_more() { " l:more" } else { "" };
+            let expire_hint = if self.is_in_deleted_folder() {
+                " D:expire"
+            } else {
+                ""
+            };
             format!(
-                " {}/{} | q:back n/p:nav RET:read g:refresh a:archive d:delete f:flag u:unread m:move s:search{}{}",
+                " {}/{} | q:back n/p:nav RET:read g:refresh a:archive d:delete{} f:flag u:unread m:move s:search{}{}",
                 self.cursor + 1,
                 self.emails.len(),
+                expire_hint,
                 search_hint,
                 load_more_hint
             )
@@ -852,6 +924,15 @@ impl View for EmailListView {
                 self.move_selected_to_folder(&target, "Delete");
                 ViewAction::Continue
             }
+            Key::Char('D') => {
+                if self.is_in_deleted_folder() {
+                    self.expire_selected_now();
+                } else {
+                    self.status_message =
+                        Some("Expire is only available in the deleted folder".to_string());
+                }
+                ViewAction::Continue
+            }
             Key::Char('s') => {
                 self.search_mode = true;
                 self.search_input.clear();
@@ -979,6 +1060,7 @@ impl View for EmailListView {
                                 EmailMutationAction::MarkUnread => "Mark unread",
                                 EmailMutationAction::SetFlagged(_) => "Flag update",
                                 EmailMutationAction::Move => "Move",
+                                EmailMutationAction::Destroy => "Expire",
                             };
                             self.status_message = Some(format!("{} failed: {}", action_label, e));
                         }

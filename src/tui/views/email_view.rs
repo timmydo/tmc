@@ -34,6 +34,7 @@ enum PendingWriteOp {
 pub struct EmailView {
     cmd_tx: mpsc::Sender<BackendCommand>,
     from_address: String,
+    can_expire_now: bool,
     email_id: String,
     email: Option<Email>,
     lines: Vec<String>,
@@ -60,10 +61,12 @@ impl EmailView {
         cmd_tx: mpsc::Sender<BackendCommand>,
         from_address: String,
         email_id: String,
+        can_expire_now: bool,
     ) -> Self {
         EmailView {
             cmd_tx,
             from_address,
+            can_expire_now,
             email_id,
             email: None,
             lines: Vec::new(),
@@ -91,6 +94,7 @@ impl EmailView {
         from_address: String,
         thread_id: String,
         _subject: String,
+        can_expire_now: bool,
     ) -> Self {
         let _ = cmd_tx.send(BackendCommand::QueryThreadEmails {
             thread_id: thread_id.clone(),
@@ -98,6 +102,7 @@ impl EmailView {
         EmailView {
             cmd_tx,
             from_address,
+            can_expire_now,
             email_id: String::new(),
             email: None,
             lines: Vec::new(),
@@ -340,6 +345,35 @@ impl EmailView {
             PendingWriteOp::Seen { old_seen } => self.set_seen(old_seen),
         }
     }
+
+    fn expire_now(&mut self) -> ViewAction {
+        if !self.can_expire_now {
+            self.status_message =
+                Some("Expire is only available in the deleted folder".to_string());
+            return ViewAction::Continue;
+        }
+
+        let op_id = self.next_op_id();
+        let send_result = if let Some(thread_id) = &self.thread_id {
+            self.cmd_tx.send(BackendCommand::DestroyThread {
+                op_id,
+                thread_id: thread_id.clone(),
+            })
+        } else {
+            self.cmd_tx.send(BackendCommand::DestroyEmail {
+                op_id,
+                id: self.email_id.clone(),
+            })
+        };
+
+        match send_result {
+            Ok(()) => ViewAction::Pop,
+            Err(e) => {
+                self.status_message = Some(format!("Expire failed: {}", e));
+                ViewAction::Continue
+            }
+        }
+    }
 }
 
 impl View for EmailView {
@@ -444,11 +478,13 @@ impl View for EmailView {
             } else {
                 ""
             };
+            let expire_hint = if self.can_expire_now { " D:expire" } else { "" };
             format!(
-                " line {}/{} | q:back n/j:down p/k:up r:reply R:reply-all F:forward{} ?:help",
+                " line {}/{} | q:back n/j:down p/k:up r:reply R:reply-all F:forward{}{} ?:help",
                 self.scroll + 1,
                 total_lines,
-                att_hint
+                att_hint,
+                expire_hint
             )
         };
         let status = if let Some(ref msg) = self.status_message {
@@ -572,6 +608,7 @@ impl View for EmailView {
                 }
                 ViewAction::Continue
             }
+            Key::Char('D') => self.expire_now(),
             Key::Char('a') => {
                 let count = self.attachment_count();
                 if count == 0 {
@@ -741,6 +778,7 @@ impl View for EmailView {
                             EmailMutationAction::MarkUnread => "Mark unread",
                             EmailMutationAction::SetFlagged(_) => "Flag update",
                             EmailMutationAction::Move => "Move",
+                            EmailMutationAction::Destroy => "Expire",
                         };
                         self.status_message = Some(format!("{} failed: {}", action_label, e));
                     }

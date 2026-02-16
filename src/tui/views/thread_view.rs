@@ -43,6 +43,7 @@ pub struct ThreadView {
     mailboxes: Vec<Mailbox>,
     archive_folder: String,
     deleted_folder: String,
+    can_expire_now: bool,
 }
 
 impl ThreadView {
@@ -54,6 +55,7 @@ impl ThreadView {
         mailboxes: Vec<Mailbox>,
         archive_folder: String,
         deleted_folder: String,
+        can_expire_now: bool,
     ) -> Self {
         let _ = cmd_tx.send(BackendCommand::QueryThreadEmails {
             thread_id: thread_id.clone(),
@@ -75,6 +77,7 @@ impl ThreadView {
             mailboxes,
             archive_folder,
             deleted_folder,
+            can_expire_now,
         }
     }
 
@@ -178,6 +181,7 @@ impl ThreadView {
             self.cmd_tx.clone(),
             self.from_address.clone(),
             email_id.clone(),
+            self.can_expire_now,
         );
         let _ = self.cmd_tx.send(BackendCommand::GetEmail {
             id: email_id.clone(),
@@ -260,6 +264,36 @@ impl ThreadView {
             self.status_message = Some(format!("{} failed: {}", action_label, e));
         }
     }
+
+    fn expire_selected_now(&mut self) {
+        let Some(email) = self.emails.get(self.cursor).cloned() else {
+            return;
+        };
+        let from_index = self.cursor;
+        let op_id = self.next_op_id();
+        self.pending_write_ops.insert(
+            op_id,
+            PendingWriteOp::Move {
+                email: Box::new(email.clone()),
+                from_index,
+            },
+        );
+        let send_result = self.cmd_tx.send(BackendCommand::DestroyEmail {
+            op_id,
+            id: email.id.clone(),
+        });
+        self.emails.remove(from_index);
+        if self.cursor >= self.emails.len() && self.cursor > 0 {
+            self.cursor -= 1;
+        }
+        if let Err(e) = send_result {
+            self.pending_write_ops.remove(&op_id);
+            let insert_at = from_index.min(self.emails.len());
+            self.emails.insert(insert_at, email);
+            self.cursor = insert_at;
+            self.status_message = Some(format!("Expire failed: {}", e));
+        }
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -339,10 +373,12 @@ impl View for ThreadView {
         } else if self.emails.is_empty() {
             " q:back g:refresh".to_string()
         } else {
+            let expire_hint = if self.can_expire_now { " D:expire" } else { "" };
             format!(
-                " {}/{} | q:back n/p:nav RET:read g:refresh a:archive d:delete f:flag u:unread",
+                " {}/{} | q:back n/p:nav RET:read g:refresh a:archive d:delete{} f:flag u:unread",
                 self.cursor + 1,
-                self.emails.len()
+                self.emails.len(),
+                expire_hint
             )
         };
         let status = if let Some(ref msg) = self.status_message {
@@ -477,6 +513,15 @@ impl View for ThreadView {
                 self.move_selected_to_folder(&target, "Delete");
                 ViewAction::Continue
             }
+            Key::Char('D') => {
+                if self.can_expire_now {
+                    self.expire_selected_now();
+                } else {
+                    self.status_message =
+                        Some("Expire is only available in the deleted folder".to_string());
+                }
+                ViewAction::Continue
+            }
             Key::Char('c') => {
                 let draft = compose::build_compose_draft(&self.from_address);
                 ViewAction::Compose(draft)
@@ -558,6 +603,7 @@ impl View for ThreadView {
                                 EmailMutationAction::MarkUnread => "Mark unread",
                                 EmailMutationAction::SetFlagged(_) => "Flag update",
                                 EmailMutationAction::Move => "Move",
+                                EmailMutationAction::Destroy => "Expire",
                             };
                             self.status_message = Some(format!("{} failed: {}", action_label, e));
                         }
