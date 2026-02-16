@@ -219,7 +219,7 @@ impl View for MailboxListView {
             " Confirm delete | y:delete n/Esc:cancel".to_string()
         } else if self.loading {
             format!(
-                " Loading... | q:quit g:refresh c:compose +:new-folder d:delete-folder x:preview-expire X:expire{}",
+                " Loading... | q:quit g:refresh c:compose +:new-folder d:delete-folder u:read-all x:preview-expire X:expire{}",
                 account_hint
             )
         } else if self.mailboxes.is_empty() {
@@ -229,7 +229,7 @@ impl View for MailboxListView {
             )
         } else {
             format!(
-                " {}/{} | q:quit n/p:navigate RET:open g:refresh c:compose +:new-folder d:delete-folder x:preview-expire X:expire ?:help{}",
+                " {}/{} | q:quit n/p:navigate RET:open g:refresh c:compose +:new-folder d:delete-folder u:read-all x:preview-expire X:expire ?:help{}",
                 self.cursor + 1,
                 self.mailboxes.len(),
                 account_hint,
@@ -380,6 +380,24 @@ impl View for MailboxListView {
             Key::Char('d') => {
                 if !self.mailboxes.is_empty() {
                     self.delete_confirm_mode = true;
+                }
+                ViewAction::Continue
+            }
+            Key::Char('u') => {
+                if let Some(mailbox) = self.mailboxes.get(self.cursor) {
+                    if mailbox.unread_emails == 0 {
+                        self.status_message =
+                            Some(format!("Folder '{}' already read", mailbox.name));
+                    } else if let Err(e) = self.cmd_tx.send(BackendCommand::MarkMailboxRead {
+                        mailbox_id: mailbox.id.clone(),
+                        mailbox_name: mailbox.name.clone(),
+                    }) {
+                        self.status_message =
+                            Some(format!("Mark folder read failed to send: {}", e));
+                    } else {
+                        self.status_message =
+                            Some(format!("Marking folder '{}' read...", mailbox.name));
+                    }
                 }
                 ViewAction::Continue
             }
@@ -576,6 +594,37 @@ impl View for MailboxListView {
                 } else {
                     false
                 }
+            }
+            BackendResponse::MailboxMarkedRead {
+                mailbox_id,
+                mailbox_name,
+                updated,
+                result,
+            } => {
+                match result {
+                    Ok(()) => {
+                        if *updated == 0 {
+                            self.status_message =
+                                Some(format!("Folder '{}' already read", mailbox_name));
+                        } else {
+                            self.status_message = Some(format!(
+                                "Marked {} message(s) read in '{}'",
+                                updated, mailbox_name
+                            ));
+                        }
+                        self.request_refresh(&format!(
+                            "mailbox_list.mailbox_marked_read:{}",
+                            mailbox_id
+                        ));
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!(
+                            "Mark all read failed for '{}': {}",
+                            mailbox_name, e
+                        ));
+                    }
+                }
+                true
             }
             _ => false,
         }

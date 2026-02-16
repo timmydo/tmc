@@ -29,6 +29,7 @@ impl HelpView {
             "  g           Refresh".to_string(),
             "  +           Create folder".to_string(),
             "  d           Delete selected folder".to_string(),
+            "  u           Mark all mail in selected folder read".to_string(),
             "  x           Preview retention expiry list".to_string(),
             "  X           Expire retained mail now".to_string(),
             "  PgDn        Page down".to_string(),

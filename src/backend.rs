@@ -71,6 +71,10 @@ pub enum BackendCommand {
         thread_id: String,
         email_ids: Vec<String>,
     },
+    MarkMailboxRead {
+        mailbox_id: String,
+        mailbox_name: String,
+    },
     GetEmailRawHeaders {
         id: String,
     },
@@ -139,6 +143,12 @@ pub enum BackendResponse {
         #[allow(dead_code)]
         thread_id: String,
         #[allow(dead_code)]
+        result: Result<(), String>,
+    },
+    MailboxMarkedRead {
+        mailbox_id: String,
+        mailbox_name: String,
+        updated: usize,
         result: Result<(), String>,
     },
     EmailRawHeaders {
@@ -562,6 +572,36 @@ fn backend_loop(
                     .mark_emails_read(&email_ids)
                     .map_err(|e| e.to_string());
                 let _ = resp_tx.send(BackendResponse::ThreadMarkedRead { thread_id, result });
+            }
+            BackendCommand::MarkMailboxRead {
+                mailbox_id,
+                mailbox_name,
+            } => {
+                log_info!(
+                    "[Backend] cmd#{} MarkMailboxRead mailbox='{}' mailbox_id='{}'",
+                    command_seq,
+                    mailbox_name,
+                    mailbox_id
+                );
+                let ids_result = fetch_all_mailbox_email_ids(&client, &mailbox_id);
+                let (updated, result) = match ids_result {
+                    Ok(ids) => {
+                        let updated = ids.len();
+                        let result = if ids.is_empty() {
+                            Ok(())
+                        } else {
+                            client.mark_emails_read(&ids).map_err(|e| e.to_string())
+                        };
+                        (updated, result)
+                    }
+                    Err(e) => (0, Err(e)),
+                };
+                let _ = resp_tx.send(BackendResponse::MailboxMarkedRead {
+                    mailbox_id,
+                    mailbox_name,
+                    updated,
+                    result,
+                });
             }
             BackendCommand::GetEmailRawHeaders { id } => {
                 let result = client
