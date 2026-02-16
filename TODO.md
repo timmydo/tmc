@@ -44,6 +44,11 @@
 - [x] P1: Add true pagination/load-more for mailbox email lists
 - [x] P1: Add periodic background sync (configurable interval)
 - [x] P2: Add attachment list + open/download flow using JMAP `downloadUrl`
-- [ ] P2: Add conversation/thread grouping
-- [ ] P2: Improve config parser robustness (quoted strings, escapes, strict errors)
-- [ ] P2: Add integration tests for config parsing and JMAP response edge cases
+- [x] P2: Add conversation/thread grouping
+- [x] P2: Improve config parser robustness (quoted strings, escapes, strict errors)
+- [x] P2: Add integration tests for config parsing and JMAP response edge cases
+
+## Phase 7: Misc
+
+- [ ] 'v' keybinding to show/hide all the mail headers for an email message
+- [ ] design and build mail sorting language

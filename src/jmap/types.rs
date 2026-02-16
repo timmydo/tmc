@@ -235,3 +235,248 @@ pub struct ThreadGetResponse {
     #[allow(dead_code)]
     pub not_found: Vec<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_deserialize_minimal_jmap_session() {
+        let data = json!({
+            "username": "user@example.com",
+            "apiUrl": "https://api.example.com/jmap"
+        });
+        let session: JmapSession = serde_json::from_value(data).unwrap();
+        assert_eq!(session.username, "user@example.com");
+        assert_eq!(session.api_url, "https://api.example.com/jmap");
+        assert!(session.download_url.is_none());
+        assert!(session.primary_accounts.is_empty());
+        assert!(session.accounts.is_empty());
+    }
+
+    #[test]
+    fn test_deserialize_full_jmap_session() {
+        let data = json!({
+            "username": "user@example.com",
+            "apiUrl": "https://api.example.com/jmap",
+            "downloadUrl": "https://api.example.com/download/{blobId}",
+            "primaryAccounts": {
+                "urn:ietf:params:jmap:mail": "acc-001"
+            },
+            "accounts": {
+                "acc-001": {
+                    "name": "Personal",
+                    "isPersonal": true,
+                    "isReadOnly": false
+                }
+            }
+        });
+        let session: JmapSession = serde_json::from_value(data).unwrap();
+        assert_eq!(
+            session.download_url.as_deref(),
+            Some("https://api.example.com/download/{blobId}")
+        );
+        assert_eq!(session.primary_accounts.len(), 1);
+        assert_eq!(session.accounts.len(), 1);
+        let acc = &session.accounts["acc-001"];
+        assert_eq!(acc.name, "Personal");
+        assert!(acc.is_personal);
+        assert!(!acc.is_read_only);
+    }
+
+    #[test]
+    fn test_mail_account_id_primary() {
+        let data = json!({
+            "username": "u@e.com",
+            "apiUrl": "https://api.e.com/jmap",
+            "primaryAccounts": {
+                "urn:ietf:params:jmap:mail": "primary-id"
+            },
+            "accounts": {
+                "primary-id": { "name": "Main", "isPersonal": true },
+                "other-id": { "name": "Other", "isPersonal": false }
+            }
+        });
+        let session: JmapSession = serde_json::from_value(data).unwrap();
+        assert_eq!(session.mail_account_id(), Some("primary-id"));
+    }
+
+    #[test]
+    fn test_mail_account_id_fallback_single() {
+        let data = json!({
+            "username": "u@e.com",
+            "apiUrl": "https://api.e.com/jmap",
+            "accounts": {
+                "only-one": { "name": "Solo", "isPersonal": true }
+            }
+        });
+        let session: JmapSession = serde_json::from_value(data).unwrap();
+        assert_eq!(session.mail_account_id(), Some("only-one"));
+    }
+
+    #[test]
+    fn test_mail_account_id_none_multiple_no_primary() {
+        let data = json!({
+            "username": "u@e.com",
+            "apiUrl": "https://api.e.com/jmap",
+            "accounts": {
+                "acc-1": { "name": "A", "isPersonal": false },
+                "acc-2": { "name": "B", "isPersonal": false }
+            }
+        });
+        let session: JmapSession = serde_json::from_value(data).unwrap();
+        assert_eq!(session.mail_account_id(), None);
+    }
+
+    #[test]
+    fn test_deserialize_email_minimal() {
+        let data = json!({
+            "id": "email-001"
+        });
+        let email: Email = serde_json::from_value(data).unwrap();
+        assert_eq!(email.id, "email-001");
+        assert!(email.thread_id.is_none());
+        assert!(email.from.is_none());
+        assert!(email.to.is_none());
+        assert!(email.cc.is_none());
+        assert!(email.reply_to.is_none());
+        assert!(email.subject.is_none());
+        assert!(email.received_at.is_none());
+        assert!(email.sent_at.is_none());
+        assert!(email.preview.is_none());
+        assert!(email.text_body.is_none());
+        assert!(email.body_values.is_empty());
+        assert!(email.keywords.is_empty());
+        assert!(email.mailbox_ids.is_empty());
+        assert!(email.message_id.is_none());
+        assert!(email.references.is_none());
+        assert!(email.attachments.is_none());
+    }
+
+    #[test]
+    fn test_deserialize_email_full() {
+        let data = json!({
+            "id": "email-002",
+            "threadId": "thread-001",
+            "from": [{"name": "Alice", "email": "alice@example.com"}],
+            "to": [{"name": "Bob", "email": "bob@example.com"}],
+            "cc": [{"email": "cc@example.com"}],
+            "replyTo": [{"name": "Alice", "email": "alice@example.com"}],
+            "subject": "Hello World",
+            "receivedAt": "2025-01-01T00:00:00Z",
+            "sentAt": "2025-01-01T00:00:00Z",
+            "preview": "This is a preview",
+            "textBody": [{"partId": "1"}],
+            "bodyValues": {"1": {"value": "body text", "isEncodingProblem": false, "isTruncated": false}},
+            "keywords": {"$seen": true, "$flagged": true},
+            "mailboxIds": {"mbox-1": true},
+            "messageId": ["<msg-id@example.com>"],
+            "references": ["<ref-1@example.com>"],
+            "attachments": [{"partId": "2", "blobId": "blob-1", "type": "application/pdf", "name": "doc.pdf", "size": 1024}]
+        });
+        let email: Email = serde_json::from_value(data).unwrap();
+        assert_eq!(email.id, "email-002");
+        assert_eq!(email.thread_id.as_deref(), Some("thread-001"));
+        assert_eq!(email.subject.as_deref(), Some("Hello World"));
+        assert_eq!(email.from.as_ref().unwrap().len(), 1);
+        assert_eq!(email.keywords.len(), 2);
+        assert_eq!(email.attachments.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            email.attachments.as_ref().unwrap()[0].name.as_deref(),
+            Some("doc.pdf")
+        );
+    }
+
+    #[test]
+    fn test_deserialize_mailbox_defaults() {
+        let data = json!({
+            "id": "mbox-1",
+            "name": "Inbox"
+        });
+        let mbox: Mailbox = serde_json::from_value(data).unwrap();
+        assert_eq!(mbox.id, "mbox-1");
+        assert_eq!(mbox.name, "Inbox");
+        assert!(mbox.parent_id.is_none());
+        assert!(mbox.role.is_none());
+        assert_eq!(mbox.total_emails, 0);
+        assert_eq!(mbox.unread_emails, 0);
+        assert_eq!(mbox.sort_order, 0);
+    }
+
+    #[test]
+    fn test_deserialize_thread() {
+        let data = json!({
+            "id": "thread-001",
+            "emailIds": ["email-1", "email-2", "email-3"]
+        });
+        let thread: Thread = serde_json::from_value(data).unwrap();
+        assert_eq!(thread.id, "thread-001");
+        assert_eq!(thread.email_ids, vec!["email-1", "email-2", "email-3"]);
+    }
+
+    #[test]
+    fn test_deserialize_email_query_response_with_total() {
+        let data = json!({
+            "accountId": "acc-1",
+            "queryState": "state-1",
+            "ids": ["e1", "e2"],
+            "position": 0,
+            "total": 42
+        });
+        let resp: EmailQueryResponse = serde_json::from_value(data).unwrap();
+        assert_eq!(resp.ids, vec!["e1", "e2"]);
+        assert_eq!(resp.total, Some(42));
+        assert_eq!(resp.position, 0);
+    }
+
+    #[test]
+    fn test_deserialize_email_query_response_without_total() {
+        let data = json!({
+            "accountId": "acc-1",
+            "queryState": "state-1",
+            "ids": [],
+            "position": 10
+        });
+        let resp: EmailQueryResponse = serde_json::from_value(data).unwrap();
+        assert!(resp.ids.is_empty());
+        assert_eq!(resp.total, None);
+        assert_eq!(resp.position, 10);
+    }
+
+    #[test]
+    fn test_email_address_display_name_and_email() {
+        let addr = EmailAddress {
+            name: Some("Alice".to_string()),
+            email: Some("alice@example.com".to_string()),
+        };
+        assert_eq!(format!("{}", addr), "Alice <alice@example.com>");
+    }
+
+    #[test]
+    fn test_email_address_display_email_only() {
+        let addr = EmailAddress {
+            name: None,
+            email: Some("alice@example.com".to_string()),
+        };
+        assert_eq!(format!("{}", addr), "alice@example.com");
+    }
+
+    #[test]
+    fn test_email_address_display_name_only() {
+        let addr = EmailAddress {
+            name: Some("Alice".to_string()),
+            email: None,
+        };
+        assert_eq!(format!("{}", addr), "Alice");
+    }
+
+    #[test]
+    fn test_email_address_display_unknown() {
+        let addr = EmailAddress {
+            name: None,
+            email: None,
+        };
+        assert_eq!(format!("{}", addr), "(unknown)");
+    }
+}

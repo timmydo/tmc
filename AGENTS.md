@@ -102,6 +102,4 @@ Credentials are fetched by running `password_command`; there is no interactive p
 
 ## Current Gaps (as of code in this repo)
 
-- No attachment UI/download workflow despite `downloadUrl` discovery.
-- No thread/conversation UI.
 - Some UI actions are optimistic and do not show explicit failure state on backend errors.
