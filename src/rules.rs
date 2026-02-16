@@ -336,50 +336,143 @@ pub fn apply_rules(
     mailboxes: &[Mailbox],
 ) -> Vec<RuleApplication> {
     let mut applications = Vec::new();
+    let mut total_actions = 0usize;
+
+    log_debug!(
+        "[Rules] Evaluating {} rule(s) against {} email(s)",
+        rules.len(),
+        emails.len()
+    );
 
     for email in emails {
+        log_debug!("[Rules] Evaluating email {}", email.id);
         for rule in rules {
-            if evaluate_condition(&rule.condition, email) {
+            let matched = evaluate_condition(&rule.condition, email);
+            log_debug!(
+                "[Rules] Email {} rule '{}' matched={}",
+                email.id,
+                rule.name,
+                matched
+            );
+
+            if matched {
                 let filtered_actions = filter_noop_actions(&rule.actions, email, mailboxes);
 
                 if !filtered_actions.is_empty() {
+                    total_actions += filtered_actions.len();
+                    log_info!(
+                        "[Rules] Email {} rule '{}' queued {} action(s): {}",
+                        email.id,
+                        rule.name,
+                        filtered_actions.len(),
+                        filtered_actions
+                            .iter()
+                            .map(format_action_name)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
                     applications.push(RuleApplication {
                         email_id: email.id.clone(),
                         rule_name: rule.name.clone(),
                         actions: filtered_actions,
                     });
+                } else {
+                    log_debug!(
+                        "[Rules] Email {} rule '{}' matched but all actions were no-ops",
+                        email.id,
+                        rule.name
+                    );
                 }
 
                 if !rule.continue_processing {
+                    log_debug!(
+                        "[Rules] Email {} stopping at rule '{}' (continue_processing=false)",
+                        email.id,
+                        rule.name
+                    );
                     break;
+                } else {
+                    log_debug!(
+                        "[Rules] Email {} continuing after rule '{}' (continue_processing=true)",
+                        email.id,
+                        rule.name
+                    );
                 }
             }
         }
     }
 
+    log_info!(
+        "[Rules] Evaluation complete: {} application(s), {} action(s)",
+        applications.len(),
+        total_actions
+    );
     applications
 }
 
 fn filter_noop_actions(actions: &[Action], email: &Email, mailboxes: &[Mailbox]) -> Vec<Action> {
-    actions
-        .iter()
-        .filter(|action| match action {
-            Action::MarkRead => !email.keywords.contains_key("$seen"),
-            Action::MarkUnread => email.keywords.contains_key("$seen"),
-            Action::Flag => !email.keywords.contains_key("$flagged"),
-            Action::Unflag => email.keywords.contains_key("$flagged"),
+    let mut filtered = Vec::new();
+    for action in actions {
+        let keep = match action {
+            Action::MarkRead => {
+                let keep = !email.keywords.contains_key("$seen");
+                if !keep {
+                    log_debug!("[Rules] Email {} skip mark_read: already read", email.id);
+                }
+                keep
+            }
+            Action::MarkUnread => {
+                let keep = email.keywords.contains_key("$seen");
+                if !keep {
+                    log_debug!(
+                        "[Rules] Email {} skip mark_unread: already unread",
+                        email.id
+                    );
+                }
+                keep
+            }
+            Action::Flag => {
+                let keep = !email.keywords.contains_key("$flagged");
+                if !keep {
+                    log_debug!("[Rules] Email {} skip flag: already flagged", email.id);
+                }
+                keep
+            }
+            Action::Unflag => {
+                let keep = email.keywords.contains_key("$flagged");
+                if !keep {
+                    log_debug!("[Rules] Email {} skip unflag: not flagged", email.id);
+                }
+                keep
+            }
             Action::Move { target } => {
-                // Resolve target mailbox name to ID
                 if let Some(target_id) = resolve_mailbox_id(target, mailboxes) {
-                    !email.mailbox_ids.contains_key(&target_id)
+                    let keep = !email.mailbox_ids.contains_key(&target_id);
+                    if !keep {
+                        log_debug!(
+                            "[Rules] Email {} skip move_to='{}': already in target mailbox",
+                            email.id,
+                            target
+                        );
+                    }
+                    keep
                 } else {
-                    false // Can't resolve target, skip
+                    log_warn!(
+                        "[Rules] Email {} skip move_to='{}': target mailbox cannot be resolved",
+                        email.id,
+                        target
+                    );
+                    false
                 }
             }
             Action::Delete => true,
-        })
-        .cloned()
-        .collect()
+        };
+
+        if keep {
+            filtered.push(action.clone());
+        }
+    }
+    filtered
 }
 
 /// Resolve a mailbox name/path to a JMAP mailbox ID.
@@ -387,6 +480,11 @@ fn filter_noop_actions(actions: &[Action], email: &Email, mailboxes: &[Mailbox])
 pub fn resolve_mailbox_id(name: &str, mailboxes: &[Mailbox]) -> Option<String> {
     // First try exact name match
     if let Some(mbox) = mailboxes.iter().find(|m| m.name == name) {
+        log_debug!(
+            "[Rules] Resolved mailbox '{}' by exact name -> {}",
+            name,
+            mbox.id
+        );
         return Some(mbox.id.clone());
     }
 
@@ -396,6 +494,7 @@ pub fn resolve_mailbox_id(name: &str, mailboxes: &[Mailbox]) -> Option<String> {
         .iter()
         .find(|m| m.role.as_ref().map(|r| r.to_lowercase()) == Some(lower.clone()))
     {
+        log_debug!("[Rules] Resolved mailbox '{}' by role -> {}", name, mbox.id);
         return Some(mbox.id.clone());
     }
 
@@ -422,12 +521,14 @@ pub fn resolve_mailbox_id(name: &str, mailboxes: &[Mailbox]) -> Option<String> {
                 path.reverse();
                 let full_path = path.join("/");
                 if full_path == name {
+                    log_debug!("[Rules] Resolved mailbox '{}' by path -> {}", name, mbox.id);
                     return Some(mbox.id.clone());
                 }
             }
         }
     }
 
+    log_warn!("[Rules] Failed to resolve mailbox '{}'", name);
     None
 }
 
@@ -437,8 +538,27 @@ pub fn execute_rule_actions(
     mailboxes: &[Mailbox],
     client: &JmapClient,
 ) {
+    let action_count = applications.iter().map(|a| a.actions.len()).sum::<usize>();
+    log_info!(
+        "[Rules] Executing {} action(s) from {} application(s)",
+        action_count,
+        applications.len()
+    );
+
     for app in applications {
+        log_debug!(
+            "[Rules] Executing application for email {} rule '{}' ({} action(s))",
+            app.email_id,
+            app.rule_name,
+            app.actions.len()
+        );
         for action in &app.actions {
+            log_debug!(
+                "[Rules] Attempting action {} on email {} (rule: {})",
+                format_action_name(action),
+                app.email_id,
+                app.rule_name
+            );
             let result = match action {
                 Action::MarkRead => client.mark_email_read(&app.email_id),
                 Action::MarkUnread => client.mark_email_unread(&app.email_id),
@@ -494,6 +614,17 @@ pub fn execute_rule_actions(
                 }
             }
         }
+    }
+}
+
+fn format_action_name(action: &Action) -> String {
+    match action {
+        Action::MarkRead => "mark_read".to_string(),
+        Action::MarkUnread => "mark_unread".to_string(),
+        Action::Flag => "flag".to_string(),
+        Action::Unflag => "unflag".to_string(),
+        Action::Move { target } => format!("move_to={}", target),
+        Action::Delete => "delete".to_string(),
     }
 }
 
