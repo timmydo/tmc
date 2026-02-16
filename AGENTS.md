@@ -22,6 +22,8 @@ Runtime options:
 ```bash
 tmc --help
 tmc --log
+tmc --prompt=config   # print AI-friendly prompt for generating config
+tmc --prompt=rules    # print AI-friendly prompt for generating rules
 ```
 
 ## Configuration
@@ -54,13 +56,13 @@ Credentials are fetched by running `password_command`; there is no interactive p
 
 ## Architecture
 
-- `src/main.rs`: CLI flags (`--help`, `--log`), config loading, first-account connect, TUI bootstrap.
+- `src/main.rs`: CLI flags (`--help`, `--log`, `--prompt=TOPIC`), config loading, first-account connect, TUI bootstrap.
 - `src/config.rs`: lightweight TOML-like parser for `[ui]`, `[jmap]`, and `[account.NAME]`.
 - `src/backend.rs`: single backend worker thread + `mpsc` command/response channels.
 - `src/jmap/client.rs`: blocking JMAP client (`ureq`), discovery + mail operations.
 - `src/jmap/types.rs`: serde-backed JMAP models.
 - `src/tui/`: raw terminal setup, input parsing, view stack, mailbox/email/help views.
-- `src/compose.rs`: compose/reply draft generation and secure temp draft files.
+- `src/compose.rs`: compose/reply/forward draft generation and secure temp draft files.
 - `src/log.rs`: file logging and `--log` support.
 
 ### Threading model
@@ -75,7 +77,7 @@ Credentials are fetched by running `password_command`; there is no interactive p
 - Mailbox list (`Mailbox/get`) with role-aware sorting and unread counts.
 - Email list (`Email/query` + `Email/get`) with per-mailbox search.
 - Email view (`Email/get`) with plain text body rendering.
-- Compose / reply / reply-all via `$EDITOR` on temp draft files.
+- Compose / reply / reply-all / forward via `$EDITOR` on temp draft files.
 - Mark read/unread, flag/unflag, move to mailbox (`Email/set` variants).
 - Multi-account switching (`a`) from mailbox view.
 - Mouse support (click select/open, wheel scrolling) for list/help views.
@@ -85,7 +87,7 @@ Credentials are fetched by running `password_command`; there is no interactive p
 - Global: `?` help, `c` compose.
 - Mailbox list: `q`, `n/p`, `j/k`, arrows, `RET`, `g`, `a`, mouse click/wheel.
 - Email list: `q`, `n/p`, `j/k`, arrows, `RET`, `g`, `f`, `u`, `m`, `s`, `Esc` (clear search), mouse click/wheel.
-- Email view: `q`, `n/p`, `j/k`, arrows, `PgUp/PgDn/Space/Home/End`, `r`, `R`, `v`, `f`, `u`, `c`.
+- Email view: `q`, `n/p`, `j/k`, arrows, `PgUp/PgDn/Space/Home/End`, `r`, `R`, `F`, `v`, `f`, `u`, `c`.
 - Help view: `q`/`?`/`Esc` close + navigation keys.
 
 ## Constraints and Non-Goals

@@ -371,6 +371,72 @@ impl JmapClient {
         Err(JmapError::Api("Unexpected response".to_string()))
     }
 
+    pub fn get_emails_with_extra_properties(
+        &self,
+        ids: &[String],
+        extra_properties: &[String],
+    ) -> Result<Vec<Email>, JmapError> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        log_info!(
+            "[JMAP] Email/get for {} email IDs with {} extra properties",
+            ids.len(),
+            extra_properties.len()
+        );
+
+        let mut properties = vec![
+            "id",
+            "threadId",
+            "from",
+            "to",
+            "cc",
+            "subject",
+            "receivedAt",
+            "preview",
+            "textBody",
+            "bodyValues",
+            "keywords",
+            "mailboxIds",
+            "attachments",
+        ];
+
+        let extra_strs: Vec<&str> = extra_properties.iter().map(|s| s.as_str()).collect();
+        properties.extend(extra_strs);
+
+        let request = JmapRequest {
+            using: vec!["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            method_calls: vec![MethodCall(
+                "Email/get",
+                json!({
+                    "accountId": self.account_id,
+                    "ids": ids,
+                    "properties": properties,
+                    "fetchTextBodyValues": true
+                }),
+                "0".to_string(),
+            )],
+        };
+
+        let response = self.call(request)?;
+
+        if let Some(method_response) = response.method_responses.first() {
+            if method_response.0 == "Email/get" {
+                let email_response: EmailGetResponse =
+                    serde_json::from_value(method_response.1.clone())
+                        .map_err(|e| JmapError::Parse(e.to_string()))?;
+                log_info!(
+                    "[JMAP] Email/get returned {} emails",
+                    email_response.list.len()
+                );
+                return Ok(email_response.list);
+            }
+        }
+
+        Err(JmapError::Api("Unexpected response".to_string()))
+    }
+
     pub fn get_email(&self, id: &str) -> Result<Option<Email>, JmapError> {
         let emails = self.get_emails(&[id.to_string()])?;
         Ok(emails.into_iter().next())

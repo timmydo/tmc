@@ -76,6 +76,7 @@ impl HelpView {
             "  End         Jump to bottom".to_string(),
             "  r           Reply".to_string(),
             "  R           Reply all".to_string(),
+            "  F           Forward".to_string(),
             "  a           Download/open attachment".to_string(),
             "  v           Toggle raw headers (DKIM, Received, etc)".to_string(),
             "  f           Toggle flagged".to_string(),

@@ -127,6 +127,57 @@ pub fn build_reply_draft(email: &crate::jmap::types::Email, reply_all: bool, fro
     draft
 }
 
+/// Build a forward draft from an existing email.
+pub fn build_forward_draft(email: &crate::jmap::types::Email, from: &str) -> String {
+    // Subject with Fwd: prefix
+    let subject = match email.subject.as_deref() {
+        Some(s) if s.starts_with("Fwd: ") || s.starts_with("fwd: ") => s.to_string(),
+        Some(s) => format!("Fwd: {}", s),
+        None => "Fwd: ".to_string(),
+    };
+
+    // Original message info
+    let orig_from = email
+        .from
+        .as_ref()
+        .map(|addrs| format_address_list(addrs))
+        .unwrap_or_else(|| "(unknown)".to_string());
+    let orig_to = email
+        .to
+        .as_ref()
+        .map(|addrs| format_address_list(addrs))
+        .unwrap_or_default();
+    let orig_cc = email
+        .cc
+        .as_ref()
+        .map(|addrs| format_address_list(addrs))
+        .unwrap_or_default();
+    let date = email
+        .sent_at
+        .as_deref()
+        .or(email.received_at.as_deref())
+        .unwrap_or("(unknown date)");
+    let orig_subject = email.subject.as_deref().unwrap_or("(no subject)");
+
+    let body_text = extract_body_text(email);
+
+    let mut draft = format!("From: {}\nTo: \nSubject: {}\n", from, subject);
+
+    draft.push_str("\n---------- Forwarded message ----------\n");
+    draft.push_str(&format!("From: {}\n", orig_from));
+    draft.push_str(&format!("Date: {}\n", date));
+    draft.push_str(&format!("Subject: {}\n", orig_subject));
+    draft.push_str(&format!("To: {}\n", orig_to));
+    if !orig_cc.is_empty() {
+        draft.push_str(&format!("Cc: {}\n", orig_cc));
+    }
+    draft.push('\n');
+    draft.push_str(&body_text);
+    draft.push('\n');
+
+    draft
+}
+
 fn format_address_list(addrs: &[crate::jmap::types::EmailAddress]) -> String {
     addrs
         .iter()
@@ -204,6 +255,7 @@ mod tests {
             message_id: Some(vec!["abc@example.com".to_string()]),
             references: None,
             attachments: None,
+            extra: HashMap::new(),
         };
 
         let draft = build_reply_draft(&email, false, "me@example.com");
@@ -215,5 +267,88 @@ mod tests {
         // Reply-all should include original To minus self
         let draft_all = build_reply_draft(&email, true, "me@example.com");
         assert!(!draft_all.contains("Cc:")); // self was the only To recipient
+    }
+
+    #[test]
+    fn test_build_forward_draft() {
+        use crate::jmap::types::{Email, EmailAddress};
+        use std::collections::HashMap;
+
+        let email = Email {
+            id: "test-id".to_string(),
+            thread_id: None,
+            from: Some(vec![EmailAddress {
+                name: Some("Sender".to_string()),
+                email: Some("sender@example.com".to_string()),
+            }]),
+            to: Some(vec![EmailAddress {
+                name: None,
+                email: Some("me@example.com".to_string()),
+            }]),
+            cc: Some(vec![EmailAddress {
+                name: Some("Other".to_string()),
+                email: Some("other@example.com".to_string()),
+            }]),
+            reply_to: None,
+            subject: Some("Hello".to_string()),
+            received_at: Some("2024-01-01T00:00:00Z".to_string()),
+            sent_at: Some("2024-01-01T00:00:00Z".to_string()),
+            preview: Some("Preview text".to_string()),
+            text_body: None,
+            body_values: HashMap::new(),
+            keywords: HashMap::new(),
+            mailbox_ids: HashMap::new(),
+            message_id: None,
+            references: None,
+            attachments: None,
+            extra: HashMap::new(),
+        };
+
+        let draft = build_forward_draft(&email, "me@example.com");
+        assert!(draft.contains("From: me@example.com"));
+        assert!(draft.contains("To: \n"));
+        assert!(draft.contains("Subject: Fwd: Hello"));
+        assert!(draft.contains("---------- Forwarded message ----------"));
+        assert!(draft.contains("From: Sender <sender@example.com>"));
+        assert!(draft.contains("Date: 2024-01-01T00:00:00Z"));
+        assert!(draft.contains("Subject: Hello"));
+        assert!(draft.contains("To: me@example.com"));
+        assert!(draft.contains("Cc: Other <other@example.com>"));
+        assert!(draft.contains("Preview text"));
+    }
+
+    #[test]
+    fn test_build_forward_draft_already_prefixed() {
+        use crate::jmap::types::{Email, EmailAddress};
+        use std::collections::HashMap;
+
+        let email = Email {
+            id: "test-id".to_string(),
+            thread_id: None,
+            from: Some(vec![EmailAddress {
+                name: None,
+                email: Some("sender@example.com".to_string()),
+            }]),
+            to: None,
+            cc: None,
+            reply_to: None,
+            subject: Some("Fwd: Already forwarded".to_string()),
+            received_at: None,
+            sent_at: None,
+            preview: Some("body".to_string()),
+            text_body: None,
+            body_values: HashMap::new(),
+            keywords: HashMap::new(),
+            mailbox_ids: HashMap::new(),
+            message_id: None,
+            references: None,
+            attachments: None,
+            extra: HashMap::new(),
+        };
+
+        let draft = build_forward_draft(&email, "me@example.com");
+        assert!(draft.contains("Subject: Fwd: Already forwarded\n"));
+        // Should not double-prefix
+        assert!(!draft.contains("Fwd: Fwd:"));
     }
 }

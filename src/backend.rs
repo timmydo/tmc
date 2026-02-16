@@ -1,7 +1,8 @@
 use crate::jmap::client::JmapClient;
 use crate::jmap::types::{Email, Mailbox};
+use crate::rules::{self, CompiledRule};
 use std::collections::HashMap;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::thread;
 
 /// Commands sent from the UI thread to the backend thread.
@@ -111,6 +112,8 @@ pub enum EmailMutationAction {
 /// Spawn the backend thread. Returns the command sender and response receiver.
 pub fn spawn(
     client: JmapClient,
+    rules: Arc<Vec<CompiledRule>>,
+    custom_headers: Arc<Vec<String>>,
 ) -> (
     mpsc::Sender<BackendCommand>,
     mpsc::Receiver<BackendResponse>,
@@ -119,7 +122,7 @@ pub fn spawn(
     let (resp_tx, resp_rx) = mpsc::channel::<BackendResponse>();
 
     thread::spawn(move || {
-        backend_loop(client, cmd_rx, resp_tx);
+        backend_loop(client, cmd_rx, resp_tx, rules, custom_headers);
     });
 
     (cmd_tx, resp_rx)
@@ -129,11 +132,18 @@ fn backend_loop(
     client: JmapClient,
     cmd_rx: mpsc::Receiver<BackendCommand>,
     resp_tx: mpsc::Sender<BackendResponse>,
+    rules: Arc<Vec<CompiledRule>>,
+    custom_headers: Arc<Vec<String>>,
 ) {
+    let mut cached_mailboxes: Vec<Mailbox> = Vec::new();
+
     while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
             BackendCommand::FetchMailboxes => {
                 let result = client.get_mailboxes().map_err(|e| e.to_string());
+                if let Ok(ref mailboxes) = result {
+                    cached_mailboxes = mailboxes.clone();
+                }
                 let _ = resp_tx.send(BackendResponse::Mailboxes(result));
             }
             BackendCommand::QueryEmails {
@@ -151,9 +161,25 @@ fn backend_loop(
                     let loaded = query.ids.len() as u32;
                     let emails = if query.ids.is_empty() {
                         Ok(Vec::new())
+                    } else if !custom_headers.is_empty() {
+                        client
+                            .get_emails_with_extra_properties(&query.ids, &custom_headers)
+                            .map_err(|e| e.to_string())
                     } else {
                         client.get_emails(&query.ids).map_err(|e| e.to_string())
                     }?;
+
+                    // Apply filtering rules
+                    if !rules.is_empty() {
+                        let applications = rules::apply_rules(&rules, &emails, &cached_mailboxes);
+                        if !applications.is_empty() {
+                            log_info!(
+                                "[Rules] Applying {} rule action(s) to fetched emails",
+                                applications.len()
+                            );
+                            rules::execute_rule_actions(&applications, &cached_mailboxes, &client);
+                        }
+                    }
 
                     // Build thread counts map (unread, total)
                     let mut thread_counts = HashMap::new();

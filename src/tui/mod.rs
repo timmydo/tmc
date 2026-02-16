@@ -6,6 +6,7 @@ use crate::backend::{self, BackendCommand};
 use crate::compose;
 use crate::config::AccountConfig;
 use crate::jmap::client::JmapClient;
+use crate::rules::CompiledRule;
 use input::read_key;
 use screen::Terminal;
 use std::io;
@@ -18,6 +19,7 @@ fn sync_mouse_for_view(term: &mut Terminal, stack: &ViewStack) -> io::Result<()>
     term.set_mouse_enabled(wants_mouse)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     client: JmapClient,
     accounts: Vec<AccountConfig>,
@@ -26,8 +28,12 @@ pub fn run(
     editor: Option<String>,
     mouse: bool,
     sync_interval_secs: Option<u64>,
+    rules: Vec<CompiledRule>,
+    custom_headers: Vec<String>,
 ) -> io::Result<()> {
-    let (mut cmd_tx, mut resp_rx) = backend::spawn(client);
+    let rules = std::sync::Arc::new(rules);
+    let custom_headers = std::sync::Arc::new(custom_headers);
+    let (mut cmd_tx, mut resp_rx) = backend::spawn(client, rules.clone(), custom_headers.clone());
     let mut term = Terminal::new(mouse)?;
 
     let account_names: Vec<String> = accounts.iter().map(|a| a.name.clone()).collect();
@@ -150,7 +156,11 @@ pub fn run(
                         // Connect to new account
                         match crate::connect_account(account) {
                             Ok(new_client) => {
-                                let (new_cmd_tx, new_resp_rx) = backend::spawn(new_client);
+                                let (new_cmd_tx, new_resp_rx) = backend::spawn(
+                                    new_client,
+                                    rules.clone(),
+                                    custom_headers.clone(),
+                                );
                                 cmd_tx = new_cmd_tx;
                                 resp_rx = new_resp_rx;
 

@@ -51,4 +51,6 @@
 ## Phase 7: Misc
 
 - [x] 'v' keybinding to show/hide all the mail headers for an email message
-- [ ] design and build mail sorting language
+- [x] 'F' for forward email
+- [x] --prompt=xyz command line parameter to generate prompts to AI agents so they will help you generate 'config', 'rules', etc.
+

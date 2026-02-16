@@ -157,6 +157,8 @@ pub struct Email {
     pub references: Option<Vec<String>>,
     #[serde(default)]
     pub attachments: Option<Vec<BodyPart>>,
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

@@ -42,6 +42,7 @@ pub struct EmailView {
     loading: bool,
     error: Option<String>,
     pending_reply_all: Option<bool>,
+    pending_forward: bool,
     pending_compose: Option<String>,
     status_message: Option<String>,
     next_write_op_id: u64,
@@ -71,6 +72,7 @@ impl EmailView {
             loading: true,
             error: None,
             pending_reply_all: None,
+            pending_forward: false,
             pending_compose: None,
             status_message: None,
             next_write_op_id: 1,
@@ -104,6 +106,7 @@ impl EmailView {
             loading: true,
             error: None,
             pending_reply_all: None,
+            pending_forward: false,
             pending_compose: None,
             status_message: None,
             next_write_op_id: 1,
@@ -429,7 +432,7 @@ impl View for EmailView {
                 total_lines,
                 self.attachment_count()
             )
-        } else if self.pending_reply_all.is_some() {
+        } else if self.pending_reply_all.is_some() || self.pending_forward {
             format!(
                 " line {}/{} | Loading reply data... | q:back",
                 self.scroll + 1,
@@ -442,7 +445,7 @@ impl View for EmailView {
                 ""
             };
             format!(
-                " line {}/{} | q:back n/j:down p/k:up r:reply R:reply-all{} ?:help",
+                " line {}/{} | q:back n/j:down p/k:up r:reply R:reply-all F:forward{} ?:help",
                 self.scroll + 1,
                 total_lines,
                 att_hint
@@ -513,6 +516,13 @@ impl View for EmailView {
             }
             Key::Char('R') => {
                 self.request_reply(true);
+                ViewAction::Continue
+            }
+            Key::Char('F') => {
+                self.pending_forward = true;
+                let _ = self.cmd_tx.send(BackendCommand::GetEmailForReply {
+                    id: self.email_id.clone(),
+                });
                 ViewAction::Continue
             }
             Key::Char('f') => {
@@ -697,10 +707,15 @@ impl View for EmailView {
             }
             BackendResponse::EmailForReply { id, result } if *id == self.email_id => {
                 let reply_all = self.pending_reply_all.take();
+                let is_forward = self.pending_forward;
+                self.pending_forward = false;
                 match result.as_ref() {
                     Ok(email) => {
                         self.email = Some(email.clone());
-                        if let Some(reply_all) = reply_all {
+                        if is_forward {
+                            let draft = compose::build_forward_draft(email, &self.from_address);
+                            self.pending_compose = Some(draft);
+                        } else if let Some(reply_all) = reply_all {
                             let draft =
                                 compose::build_reply_draft(email, reply_all, &self.from_address);
                             self.pending_compose = Some(draft);
