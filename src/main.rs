@@ -123,6 +123,7 @@ sync_interval_secs = 60   # optional: background sync interval (default 60, 0 = 
 [mail]
 archive_folder = "Archive"  # optional: target folder for 'a' archive action (default "archive")
 deleted_folder = "Trash"    # optional: target folder for 'd' delete action (default "trash")
+rules_mailbox_regex = "^INBOX$"  # optional: auto-run rules only when mailbox name matches (default "^INBOX$")
 
 [retention.archive]
 folder = "Archive"
@@ -149,6 +150,7 @@ Rules:
 - `password_command` is a shell command that prints the password to stdout.
 - Quoted strings support \", \\, \n, \t escapes.
 - `archive_folder` and `deleted_folder` are mailbox targets for `a` and `d` in list views.
+- `rules_mailbox_regex` controls which mailbox names auto-run rules on refresh/fetch; default is `^INBOX$`.
 - `[retention.NAME]` sections are optional folder retention policies used by `x` (preview) and `X` (expire) in mailbox view.
 - Retention policy fields:
   - `folder` (required): mailbox name, role, or path (e.g. "INBOX/Alerts")
@@ -364,6 +366,7 @@ fn main() {
         config.ui.sync_interval_secs,
         config.mail.archive_folder,
         config.mail.deleted_folder,
+        config.mail.rules_mailbox_regex,
         config.mail.retention_policies,
         compiled_rules,
         custom_headers,

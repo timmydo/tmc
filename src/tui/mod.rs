@@ -8,6 +8,7 @@ use crate::config::{AccountConfig, RetentionPolicyConfig};
 use crate::jmap::client::JmapClient;
 use crate::rules::CompiledRule;
 use input::read_key;
+use regex::Regex;
 use screen::Terminal;
 use std::io;
 use std::time::{Duration, Instant};
@@ -30,13 +31,29 @@ pub fn run(
     sync_interval_secs: Option<u64>,
     archive_folder: String,
     deleted_folder: String,
+    rules_mailbox_regex: String,
     retention_policies: Vec<RetentionPolicyConfig>,
     rules: Vec<CompiledRule>,
     custom_headers: Vec<String>,
 ) -> io::Result<()> {
     let rules = std::sync::Arc::new(rules);
     let custom_headers = std::sync::Arc::new(custom_headers);
-    let (mut cmd_tx, mut resp_rx) = backend::spawn(client, rules.clone(), custom_headers.clone());
+    let rules_mailbox_regex =
+        std::sync::Arc::new(Regex::new(&rules_mailbox_regex).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "invalid mail.rules_mailbox_regex '{}': {}",
+                    rules_mailbox_regex, e
+                ),
+            )
+        })?);
+    let (mut cmd_tx, mut resp_rx) = backend::spawn(
+        client,
+        rules.clone(),
+        custom_headers.clone(),
+        rules_mailbox_regex.clone(),
+    );
     let mut term = Terminal::new(mouse)?;
 
     let account_names: Vec<String> = accounts.iter().map(|a| a.name.clone()).collect();
@@ -166,6 +183,7 @@ pub fn run(
                                     new_client,
                                     rules.clone(),
                                     custom_headers.clone(),
+                                    rules_mailbox_regex.clone(),
                                 );
                                 cmd_tx = new_cmd_tx;
                                 resp_rx = new_resp_rx;

@@ -2,6 +2,7 @@ use crate::config::RetentionPolicyConfig;
 use crate::jmap::client::JmapClient;
 use crate::jmap::types::{Email, Mailbox};
 use crate::rules::{self, CompiledRule};
+use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -220,6 +221,7 @@ pub fn spawn(
     client: JmapClient,
     rules: Arc<Vec<CompiledRule>>,
     custom_headers: Arc<Vec<String>>,
+    rules_mailbox_regex: Arc<Regex>,
 ) -> (
     mpsc::Sender<BackendCommand>,
     mpsc::Receiver<BackendResponse>,
@@ -228,7 +230,14 @@ pub fn spawn(
     let (resp_tx, resp_rx) = mpsc::channel::<BackendResponse>();
 
     thread::spawn(move || {
-        backend_loop(client, cmd_rx, resp_tx, rules, custom_headers);
+        backend_loop(
+            client,
+            cmd_rx,
+            resp_tx,
+            rules,
+            custom_headers,
+            rules_mailbox_regex,
+        );
     });
 
     (cmd_tx, resp_rx)
@@ -240,6 +249,7 @@ fn backend_loop(
     resp_tx: mpsc::Sender<BackendResponse>,
     rules: Arc<Vec<CompiledRule>>,
     custom_headers: Arc<Vec<String>>,
+    rules_mailbox_regex: Arc<Regex>,
 ) {
     let mut cached_mailboxes: Vec<Mailbox> = Vec::new();
 
@@ -291,13 +301,32 @@ fn backend_loop(
 
                     // Apply filtering rules
                     if !rules.is_empty() {
-                        let applications = rules::apply_rules(&rules, &emails, &cached_mailboxes);
-                        if !applications.is_empty() {
-                            log_info!(
-                                "[Rules] Applying {} rule action(s) to fetched emails",
-                                applications.len()
+                        let mailbox_name = cached_mailboxes
+                            .iter()
+                            .find(|m| m.id.as_str() == mailbox_id.as_str())
+                            .map(|m| m.name.as_str())
+                            .unwrap_or("");
+                        if rules_mailbox_regex.is_match(mailbox_name) {
+                            let applications =
+                                rules::apply_rules(&rules, &emails, &cached_mailboxes);
+                            if !applications.is_empty() {
+                                log_info!(
+                                    "[Rules] Applying {} rule action(s) to fetched emails in mailbox '{}'",
+                                    applications.len(),
+                                    mailbox_name
+                                );
+                                rules::execute_rule_actions(
+                                    &applications,
+                                    &cached_mailboxes,
+                                    &client,
+                                );
+                            }
+                        } else {
+                            log_debug!(
+                                "[Rules] Skipping auto-run for mailbox '{}' (does not match regex '{}')",
+                                mailbox_name,
+                                rules_mailbox_regex.as_str()
                             );
-                            rules::execute_rule_actions(&applications, &cached_mailboxes, &client);
                         }
                     }
 
@@ -637,7 +666,6 @@ fn run_rules_for_mailbox(
             actions: 0,
         });
     }
-
     let mut position = 0u32;
     let mut scanned = 0usize;
     let mut matched_rules = 0usize;
@@ -696,7 +724,6 @@ fn preview_rules_for_mailbox(
             entries: Vec::new(),
         });
     }
-
     let mut position = 0u32;
     let mut scanned = 0usize;
     let mut matched_rules = 0usize;
