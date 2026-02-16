@@ -262,9 +262,11 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        eprintln!("Usage: tmc [--clear-log] [--log] [--print-rules] [--prompt=TOPIC] [--cli] [--help-cli]");
+        eprintln!("Usage: tmc [OPTIONS]");
         eprintln!();
         eprintln!("Options:");
+        eprintln!("  --config=PATH    Use config file at PATH instead of default");
+        eprintln!("  --rules=PATH     Use rules file at PATH instead of default");
         eprintln!("  --clear-log      Truncate the log file at startup");
         eprintln!("  --log            View the log file in $PAGER");
         eprintln!("  --print-rules    Parse and print rules.toml");
@@ -310,7 +312,12 @@ fn main() {
 
     log::init();
 
-    let config_path = default_config_path();
+    let config_path = args
+        .iter()
+        .find(|a| a.starts_with("--config="))
+        .map(|a| PathBuf::from(&a["--config=".len()..]))
+        .unwrap_or_else(default_config_path);
+
     let config = match Config::load(&config_path) {
         Ok(c) => c,
         Err(e) => {
@@ -326,7 +333,11 @@ fn main() {
     };
 
     // Load rules (optional — missing file = no rules)
-    let rules_path = config_path.parent().unwrap().join("rules.toml");
+    let rules_path = args
+        .iter()
+        .find(|a| a.starts_with("--rules="))
+        .map(|a| PathBuf::from(&a["--rules=".len()..]))
+        .unwrap_or_else(|| config_path.parent().unwrap().join("rules.toml"));
     let (compiled_rules, custom_headers) = if rules_path.exists() {
         match rules::load_rules(&rules_path) {
             Ok(rules) => {
