@@ -328,6 +328,53 @@ impl JmapClient {
         Err(JmapError::Api("Unexpected response".to_string()))
     }
 
+    pub fn query_emails_uncollapsed(
+        &self,
+        mailbox_id: &str,
+        limit: u32,
+        position: u32,
+    ) -> Result<EmailQueryResult, JmapError> {
+        log_info!(
+            "[JMAP] Email/query (uncollapsed) for mailbox: {} (limit: {}, position: {})",
+            mailbox_id,
+            limit,
+            position
+        );
+
+        let request = JmapRequest {
+            using: vec!["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            method_calls: vec![MethodCall(
+                "Email/query",
+                json!({
+                    "accountId": self.account_id,
+                    "filter": { "inMailbox": mailbox_id },
+                    "sort": [{ "property": "receivedAt", "isAscending": false }],
+                    "collapseThreads": false,
+                    "limit": limit,
+                    "position": position
+                }),
+                "0".to_string(),
+            )],
+        };
+
+        let response = self.call(request)?;
+
+        if let Some(method_response) = response.method_responses.first() {
+            if method_response.0 == "Email/query" {
+                let query_response: EmailQueryResponse =
+                    serde_json::from_value(method_response.1.clone())
+                        .map_err(|e| JmapError::Parse(e.to_string()))?;
+                return Ok(EmailQueryResult {
+                    ids: query_response.ids,
+                    total: query_response.total,
+                    position: query_response.position,
+                });
+            }
+        }
+
+        Err(JmapError::Api("Unexpected response".to_string()))
+    }
+
     pub fn get_emails(&self, ids: &[String]) -> Result<Vec<Email>, JmapError> {
         if ids.is_empty() {
             return Ok(vec![]);
@@ -670,6 +717,45 @@ impl JmapClient {
                         return Err(JmapError::Api(format!(
                             "Failed to move email: {:?}",
                             not_updated
+                        )));
+                    }
+                }
+                return Ok(());
+            }
+        }
+
+        Err(JmapError::Api(
+            "Unexpected response for Email/set".to_string(),
+        ))
+    }
+
+    pub fn destroy_emails(&self, ids: &[String]) -> Result<(), JmapError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        log_info!("[JMAP] Email/set destroying {} emails", ids.len());
+        let request = JmapRequest {
+            using: vec!["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            method_calls: vec![MethodCall(
+                "Email/set",
+                json!({
+                    "accountId": self.account_id,
+                    "destroy": ids
+                }),
+                "0".to_string(),
+            )],
+        };
+
+        let response = self.call(request)?;
+
+        if let Some(method_response) = response.method_responses.first() {
+            if method_response.0 == "Email/set" {
+                if let Some(not_destroyed) = method_response.1.get("notDestroyed") {
+                    if not_destroyed.as_object().is_some_and(|o| !o.is_empty()) {
+                        return Err(JmapError::Api(format!(
+                            "Failed to destroy some emails: {:?}",
+                            not_destroyed
                         )));
                     }
                 }

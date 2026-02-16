@@ -13,6 +13,7 @@ pub struct AccountConfig {
 pub struct Config {
     pub accounts: Vec<AccountConfig>,
     pub ui: UiConfig,
+    pub mail: MailConfig,
 }
 
 #[derive(Debug)]
@@ -21,6 +22,20 @@ pub struct UiConfig {
     pub page_size: u32,
     pub mouse: bool,
     pub sync_interval_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RetentionPolicyConfig {
+    pub name: String,
+    pub folder: String,
+    pub days: u32,
+}
+
+#[derive(Debug)]
+pub struct MailConfig {
+    pub archive_folder: String,
+    pub deleted_folder: String,
+    pub retention_policies: Vec<RetentionPolicyConfig>,
 }
 
 #[derive(Debug)]
@@ -113,8 +128,10 @@ fn parse_value(raw_value: &str, line_num: usize) -> Result<String, ConfigError> 
 }
 
 const KNOWN_UI_KEYS: &[&str] = &["editor", "page_size", "mouse", "sync_interval_secs"];
+const KNOWN_MAIL_KEYS: &[&str] = &["archive_folder", "deleted_folder"];
 const KNOWN_JMAP_KEYS: &[&str] = &["well_known_url", "username", "password_command"];
 const KNOWN_ACCOUNT_KEYS: &[&str] = &["well_known_url", "username", "password_command"];
+const KNOWN_RETENTION_KEYS: &[&str] = &["folder", "days"];
 
 impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
@@ -127,6 +144,8 @@ impl Config {
         let mut page_size = 500u32;
         let mut mouse = true;
         let mut sync_interval_secs = Some(60u64);
+        let mut archive_folder = "archive".to_string();
+        let mut deleted_folder = "trash".to_string();
 
         // Legacy [jmap] fields
         let mut jmap_well_known_url = None;
@@ -137,6 +156,7 @@ impl Config {
         #[allow(clippy::type_complexity)]
         let mut accounts: Vec<(String, Option<String>, Option<String>, Option<String>)> =
             Vec::new();
+        let mut retention_policies: Vec<(String, Option<String>, Option<u32>)> = Vec::new();
 
         let mut current_section = String::new();
 
@@ -152,8 +172,10 @@ impl Config {
                 current_section = line[1..line.len() - 1].to_string();
                 // Validate section name
                 if current_section != "ui"
+                    && current_section != "mail"
                     && current_section != "jmap"
                     && !current_section.starts_with("account.")
+                    && !current_section.starts_with("retention.")
                 {
                     return Err(ConfigError::Parse(format!(
                         "line {}: unknown section [{}]",
@@ -175,6 +197,22 @@ impl Config {
                         )));
                     }
                     accounts.push((name.to_string(), None, None, None));
+                }
+                // Pre-create retention entry when we see [retention.NAME]
+                if let Some(name) = current_section.strip_prefix("retention.") {
+                    if name.is_empty() {
+                        return Err(ConfigError::Parse(format!(
+                            "line {}: empty policy name in [retention.]",
+                            line_num
+                        )));
+                    }
+                    if retention_policies.iter().any(|(n, _, _)| n == name) {
+                        return Err(ConfigError::Parse(format!(
+                            "line {}: duplicate retention policy name '{}'",
+                            line_num, name
+                        )));
+                    }
+                    retention_policies.push((name.to_string(), None, None));
                 }
                 continue;
             }
@@ -224,6 +262,18 @@ impl Config {
                         }
                         _ => {}
                     }
+                } else if current_section == "mail" {
+                    if !KNOWN_MAIL_KEYS.contains(&key) {
+                        return Err(ConfigError::Parse(format!(
+                            "line {}: unknown key '{}' in [mail]",
+                            line_num, key
+                        )));
+                    }
+                    match key {
+                        "archive_folder" => archive_folder = value,
+                        "deleted_folder" => deleted_folder = value,
+                        _ => {}
+                    }
                 } else if current_section == "jmap" {
                     if !KNOWN_JMAP_KEYS.contains(&key) {
                         return Err(ConfigError::Parse(format!(
@@ -252,6 +302,35 @@ impl Config {
                             _ => {}
                         }
                     }
+                } else if let Some(name) = current_section.strip_prefix("retention.") {
+                    if !KNOWN_RETENTION_KEYS.contains(&key) {
+                        return Err(ConfigError::Parse(format!(
+                            "line {}: unknown key '{}' in [retention.{}]",
+                            line_num, key, name
+                        )));
+                    }
+                    if let Some(policy) = retention_policies.iter_mut().find(|(n, _, _)| n == name)
+                    {
+                        match key {
+                            "folder" => policy.1 = Some(value),
+                            "days" => {
+                                let days: u32 = value.parse().map_err(|_| {
+                                    ConfigError::Parse(format!(
+                                        "line {}: invalid numeric value '{}' for days",
+                                        line_num, value
+                                    ))
+                                })?;
+                                if days == 0 {
+                                    return Err(ConfigError::Parse(format!(
+                                        "line {}: days must be greater than 0 in [retention.{}]",
+                                        line_num, name
+                                    )));
+                                }
+                                policy.2 = Some(days);
+                            }
+                            _ => {}
+                        }
+                    }
                 } else if !current_section.is_empty() {
                     // This shouldn't happen since unknown sections are caught above,
                     // but handle it for safety
@@ -261,6 +340,18 @@ impl Config {
                     )));
                 }
             }
+        }
+
+        // Build final retention policy list
+        let mut final_retention_policies = Vec::new();
+        for (name, folder, days) in retention_policies {
+            let folder = folder.ok_or_else(|| {
+                ConfigError::Parse(format!("missing folder in [retention.{}]", name))
+            })?;
+            let days = days.ok_or_else(|| {
+                ConfigError::Parse(format!("missing days in [retention.{}]", name))
+            })?;
+            final_retention_policies.push(RetentionPolicyConfig { name, folder, days });
         }
 
         // Build final account list
@@ -316,6 +407,11 @@ impl Config {
                 mouse,
                 sync_interval_secs,
             },
+            mail: MailConfig {
+                archive_folder,
+                deleted_folder,
+                retention_policies: final_retention_policies,
+            },
         })
     }
 }
@@ -363,6 +459,9 @@ page_size = 25
         assert_eq!(config.ui.page_size, 25);
         assert!(config.ui.editor.is_none());
         assert_eq!(config.ui.sync_interval_secs, Some(60));
+        assert_eq!(config.mail.archive_folder, "archive");
+        assert_eq!(config.mail.deleted_folder, "trash");
+        assert!(config.mail.retention_policies.is_empty());
     }
 
     #[test]
@@ -391,6 +490,8 @@ password_command = "pass show email/work.com"
         assert_eq!(config.ui.page_size, 100);
         assert_eq!(config.ui.editor.as_deref(), Some("nvim"));
         assert_eq!(config.ui.sync_interval_secs, Some(60));
+        assert_eq!(config.mail.archive_folder, "archive");
+        assert_eq!(config.mail.deleted_folder, "trash");
     }
 
     #[test]
@@ -672,6 +773,69 @@ password_command = "pass show email"
         match err {
             ConfigError::Parse(msg) => {
                 assert!(msg.contains("empty account name"), "got: {}", msg);
+            }
+            _ => panic!("expected Parse error"),
+        }
+    }
+
+    #[test]
+    fn test_mail_config() {
+        let toml = r#"
+[mail]
+archive_folder = "Archive"
+deleted_folder = "Trash"
+
+[jmap]
+well_known_url = "https://mx.example.com/.well-known/jmap"
+username = "user@example.com"
+password_command = "pass show email/example.com"
+"#;
+        let config = Config::parse(toml).unwrap();
+        assert_eq!(config.mail.archive_folder, "Archive");
+        assert_eq!(config.mail.deleted_folder, "Trash");
+    }
+
+    #[test]
+    fn test_retention_policies_config() {
+        let toml = r#"
+[retention.archive]
+folder = "Archive"
+days = 365
+
+[retention.trash]
+folder = "Trash"
+days = 30
+
+[jmap]
+well_known_url = "https://mx.example.com/.well-known/jmap"
+username = "user@example.com"
+password_command = "pass show email/example.com"
+"#;
+        let config = Config::parse(toml).unwrap();
+        assert_eq!(config.mail.retention_policies.len(), 2);
+        assert_eq!(config.mail.retention_policies[0].name, "archive");
+        assert_eq!(config.mail.retention_policies[0].folder, "Archive");
+        assert_eq!(config.mail.retention_policies[0].days, 365);
+        assert_eq!(config.mail.retention_policies[1].name, "trash");
+        assert_eq!(config.mail.retention_policies[1].folder, "Trash");
+        assert_eq!(config.mail.retention_policies[1].days, 30);
+    }
+
+    #[test]
+    fn test_retention_policy_missing_days() {
+        let toml = r#"
+[retention.archive]
+folder = "Archive"
+
+[jmap]
+well_known_url = "https://mx.example.com/.well-known/jmap"
+username = "user@example.com"
+password_command = "pass show email/example.com"
+"#;
+        let err = Config::parse(toml).unwrap_err();
+        match err {
+            ConfigError::Parse(msg) => {
+                assert!(msg.contains("missing days"), "got: {}", msg);
             }
             _ => panic!("expected Parse error"),
         }

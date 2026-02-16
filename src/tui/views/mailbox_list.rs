@@ -1,10 +1,12 @@
-use crate::backend::{BackendCommand, BackendResponse, EmailMutationAction};
+use crate::backend::{BackendCommand, BackendResponse, EmailMutationAction, RetentionCandidate};
 use crate::compose;
+use crate::config::RetentionPolicyConfig;
 use crate::jmap::types::Mailbox;
 use crate::tui::input::Key;
 use crate::tui::screen::Terminal;
 use crate::tui::views::email_list::EmailListView;
 use crate::tui::views::help::HelpView;
+use crate::tui::views::retention_preview::RetentionPreviewView;
 use crate::tui::views::{View, ViewAction};
 use std::io;
 use std::sync::mpsc;
@@ -20,6 +22,11 @@ pub struct MailboxListView {
     account_names: Vec<String>,
     current_account: String,
     pending_click: bool,
+    archive_folder: String,
+    deleted_folder: String,
+    retention_policies: Vec<RetentionPolicyConfig>,
+    status_message: Option<String>,
+    pending_retention_preview: Option<Vec<RetentionCandidate>>,
 }
 
 impl MailboxListView {
@@ -29,6 +36,9 @@ impl MailboxListView {
         page_size: u32,
         account_names: Vec<String>,
         current_account: String,
+        archive_folder: String,
+        deleted_folder: String,
+        retention_policies: Vec<RetentionPolicyConfig>,
     ) -> Self {
         MailboxListView {
             cmd_tx,
@@ -41,6 +51,11 @@ impl MailboxListView {
             account_names,
             current_account,
             pending_click: false,
+            archive_folder,
+            deleted_folder,
+            retention_policies,
+            status_message: None,
+            pending_retention_preview: None,
         }
     }
 
@@ -170,19 +185,30 @@ impl View for MailboxListView {
             ""
         };
         let status = if self.loading {
-            format!(" Loading... | q:quit{}", account_hint)
+            format!(
+                " Loading... | q:quit g:refresh c:compose x:preview-expire X:expire{}",
+                account_hint
+            )
         } else if self.mailboxes.is_empty() {
-            format!(" q:quit g:refresh{}", account_hint)
+            format!(
+                " q:quit g:refresh c:compose x:preview-expire X:expire{}",
+                account_hint
+            )
         } else {
             format!(
-                " {}/{} | q:quit n/p:navigate RET:open g:refresh c:compose ?:help{}",
+                " {}/{} | q:quit n/p:navigate RET:open g:refresh c:compose x:preview-expire X:expire ?:help{}",
                 self.cursor + 1,
                 self.mailboxes.len(),
                 account_hint,
             )
         };
-        term.write_truncated(&status, term.cols)?;
-        let remaining = (term.cols as usize).saturating_sub(status.len());
+        let full_status = if let Some(ref msg) = self.status_message {
+            format!("{} | {}", msg, status)
+        } else {
+            status
+        };
+        term.write_truncated(&full_status, term.cols)?;
+        let remaining = (term.cols as usize).saturating_sub(full_status.len());
         for _ in 0..remaining {
             term.write_str(" ")?;
         }
@@ -236,6 +262,8 @@ impl View for MailboxListView {
                         mailbox.name.clone(),
                         self.page_size,
                         self.mailboxes.clone(),
+                        self.archive_folder.clone(),
+                        self.deleted_folder.clone(),
                     );
                     // Send the query command
                     let _ = self.cmd_tx.send(BackendCommand::QueryEmails {
@@ -251,6 +279,20 @@ impl View for MailboxListView {
             }
             Key::Char('g') => {
                 self.request_refresh();
+                ViewAction::Continue
+            }
+            Key::Char('x') => {
+                let _ = self.cmd_tx.send(BackendCommand::PreviewRetentionExpiry {
+                    policies: self.retention_policies.clone(),
+                });
+                self.status_message = Some("Building retention preview...".to_string());
+                ViewAction::Continue
+            }
+            Key::Char('X') => {
+                let _ = self.cmd_tx.send(BackendCommand::ExecuteRetentionExpiry {
+                    policies: self.retention_policies.clone(),
+                });
+                self.status_message = Some("Expiring retained mail...".to_string());
                 ViewAction::Continue
             }
             Key::Char('c') => {
@@ -309,6 +351,8 @@ impl View for MailboxListView {
                     mailbox.name.clone(),
                     self.page_size,
                     self.mailboxes.clone(),
+                    self.archive_folder.clone(),
+                    self.deleted_folder.clone(),
                 );
                 let _ = self.cmd_tx.send(BackendCommand::QueryEmails {
                     mailbox_id: mailbox.id.clone(),
@@ -318,6 +362,11 @@ impl View for MailboxListView {
                 });
                 return Some(ViewAction::Push(Box::new(view)));
             }
+        }
+        if let Some(candidates) = self.pending_retention_preview.take() {
+            return Some(ViewAction::Push(Box::new(RetentionPreviewView::new(
+                candidates,
+            ))));
         }
         None
     }
@@ -338,6 +387,42 @@ impl View for MailboxListView {
                     }
                     Err(e) => {
                         self.error = Some(format!("Failed to fetch mailboxes: {}", e));
+                    }
+                }
+                true
+            }
+            BackendResponse::RetentionPreview { result } => {
+                match result {
+                    Ok(preview) => {
+                        self.status_message = Some(format!(
+                            "{} message(s) eligible for expiry",
+                            preview.candidates.len()
+                        ));
+                        self.pending_retention_preview = Some(preview.candidates.clone());
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Retention preview failed: {}", e));
+                    }
+                }
+                true
+            }
+            BackendResponse::RetentionExecuted { result } => {
+                match result {
+                    Ok(exec) => {
+                        if exec.failed_batches.is_empty() {
+                            self.status_message =
+                                Some(format!("Expired {} message(s)", exec.deleted));
+                        } else {
+                            self.status_message = Some(format!(
+                                "Expired {} message(s), {} batch(es) failed",
+                                exec.deleted,
+                                exec.failed_batches.len()
+                            ));
+                        }
+                        self.request_refresh();
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Retention expiry failed: {}", e));
                     }
                 }
                 true

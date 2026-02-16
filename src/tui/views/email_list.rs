@@ -1,6 +1,7 @@
 use crate::backend::{BackendCommand, BackendResponse, EmailMutationAction};
 use crate::compose;
 use crate::jmap::types::{Email, Mailbox};
+use crate::rules;
 use crate::tui::input::Key;
 use crate::tui::screen::Terminal;
 use crate::tui::views::email_view::EmailView;
@@ -52,6 +53,8 @@ pub struct EmailListView {
     pending_write_ops: HashMap<u64, PendingWriteOp>,
     thread_counts: HashMap<String, (usize, usize)>,
     scroll_offset: usize,
+    archive_folder: String,
+    deleted_folder: String,
 }
 
 impl EmailListView {
@@ -62,6 +65,8 @@ impl EmailListView {
         mailbox_name: String,
         page_size: u32,
         mailboxes: Vec<Mailbox>,
+        archive_folder: String,
+        deleted_folder: String,
     ) -> Self {
         EmailListView {
             cmd_tx,
@@ -89,6 +94,8 @@ impl EmailListView {
             pending_write_ops: HashMap::new(),
             thread_counts: HashMap::new(),
             scroll_offset: 0,
+            archive_folder,
+            deleted_folder,
         }
     }
 
@@ -301,6 +308,9 @@ impl EmailListView {
                 self.from_address.clone(),
                 thread_id,
                 subject,
+                self.mailboxes.clone(),
+                self.archive_folder.clone(),
+                self.deleted_folder.clone(),
             );
             Some(ViewAction::Push(Box::new(view)))
         } else {
@@ -362,6 +372,74 @@ impl EmailListView {
             self.scroll_offset = self.cursor;
         } else if self.cursor >= self.scroll_offset + max_items {
             self.scroll_offset = self.cursor - max_items + 1;
+        }
+    }
+
+    fn move_selected_to_folder(&mut self, folder: &str, action_label: &str) {
+        let Some(target_id) = rules::resolve_mailbox_id(folder, &self.mailboxes) else {
+            self.status_message = Some(format!(
+                "{} failed: could not resolve folder '{}'",
+                action_label, folder
+            ));
+            return;
+        };
+
+        let Some(email) = self.emails.get(self.cursor).cloned() else {
+            return;
+        };
+        let thread_total = self
+            .get_thread_counts(&email)
+            .map(|(_, total)| total)
+            .unwrap_or(1);
+        let op_id = self.next_op_id();
+        let from_index = self.cursor;
+        self.pending_write_ops.insert(
+            op_id,
+            PendingWriteOp::Move {
+                email: Box::new(email.clone()),
+                from_index,
+            },
+        );
+
+        let send_result = if thread_total > 1 {
+            if let Some(thread_id) = email.thread_id.clone() {
+                self.cmd_tx.send(BackendCommand::MoveThread {
+                    op_id,
+                    thread_id,
+                    to_mailbox_id: target_id,
+                })
+            } else {
+                self.cmd_tx.send(BackendCommand::MoveEmail {
+                    op_id,
+                    id: email.id.clone(),
+                    to_mailbox_id: target_id,
+                })
+            }
+        } else {
+            self.cmd_tx.send(BackendCommand::MoveEmail {
+                op_id,
+                id: email.id.clone(),
+                to_mailbox_id: target_id,
+            })
+        };
+
+        self.emails.remove(from_index);
+        if self.cursor >= self.emails.len() && self.cursor > 0 {
+            self.cursor -= 1;
+        }
+        if let Some(ref mut total) = self.total {
+            *total = total.saturating_sub(1);
+        }
+        if let Err(e) = send_result {
+            self.record_send_failure(
+                op_id,
+                PendingWriteOp::Move {
+                    email: Box::new(email),
+                    from_index,
+                },
+                action_label,
+                e.to_string(),
+            );
         }
     }
 }
@@ -510,7 +588,7 @@ impl View for EmailListView {
             };
             let load_more_hint = if self.can_load_more() { " l:more" } else { "" };
             format!(
-                " {}/{} | q:back n/p:nav RET:read g:refresh f:flag u:unread m:move s:search{}{}",
+                " {}/{} | q:back n/p:nav RET:read g:refresh a:archive d:delete f:flag u:unread m:move s:search{}{}",
                 self.cursor + 1,
                 self.emails.len(),
                 search_hint,
@@ -762,6 +840,16 @@ impl View for EmailListView {
                     self.move_mode = true;
                     self.move_cursor = 0;
                 }
+                ViewAction::Continue
+            }
+            Key::Char('a') => {
+                let target = self.archive_folder.clone();
+                self.move_selected_to_folder(&target, "Archive");
+                ViewAction::Continue
+            }
+            Key::Char('d') => {
+                let target = self.deleted_folder.clone();
+                self.move_selected_to_folder(&target, "Delete");
                 ViewAction::Continue
             }
             Key::Char('s') => {

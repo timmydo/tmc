@@ -4,7 +4,7 @@ pub mod views;
 
 use crate::backend::{self, BackendCommand};
 use crate::compose;
-use crate::config::AccountConfig;
+use crate::config::{AccountConfig, RetentionPolicyConfig};
 use crate::jmap::client::JmapClient;
 use crate::rules::CompiledRule;
 use input::read_key;
@@ -28,6 +28,9 @@ pub fn run(
     editor: Option<String>,
     mouse: bool,
     sync_interval_secs: Option<u64>,
+    archive_folder: String,
+    deleted_folder: String,
+    retention_policies: Vec<RetentionPolicyConfig>,
     rules: Vec<CompiledRule>,
     custom_headers: Vec<String>,
 ) -> io::Result<()> {
@@ -45,6 +48,9 @@ pub fn run(
         page_size,
         account_names.clone(),
         accounts[current_idx].name.clone(),
+        archive_folder.clone(),
+        deleted_folder.clone(),
+        retention_policies.clone(),
     );
     let _ = cmd_tx.send(BackendCommand::FetchMailboxes);
 
@@ -170,6 +176,9 @@ pub fn run(
                                     page_size,
                                     account_names.clone(),
                                     account.name.clone(),
+                                    archive_folder.clone(),
+                                    deleted_folder.clone(),
+                                    retention_policies.clone(),
                                 );
                                 let _ = cmd_tx.send(BackendCommand::FetchMailboxes);
                                 stack = ViewStack::new(Box::new(mailbox_view));

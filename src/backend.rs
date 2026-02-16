@@ -1,9 +1,11 @@
+use crate::config::RetentionPolicyConfig;
 use crate::jmap::client::JmapClient;
 use crate::jmap::types::{Email, Mailbox};
 use crate::rules::{self, CompiledRule};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{mpsc, Arc};
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Commands sent from the UI thread to the backend thread.
 pub enum BackendCommand {
@@ -38,6 +40,11 @@ pub enum BackendCommand {
         id: String,
         to_mailbox_id: String,
     },
+    MoveThread {
+        op_id: u64,
+        thread_id: String,
+        to_mailbox_id: String,
+    },
     QueryThreadEmails {
         thread_id: String,
     },
@@ -52,6 +59,12 @@ pub enum BackendCommand {
         blob_id: String,
         name: String,
         content_type: String,
+    },
+    PreviewRetentionExpiry {
+        policies: Vec<RetentionPolicyConfig>,
+    },
+    ExecuteRetentionExpiry {
+        policies: Vec<RetentionPolicyConfig>,
     },
     Shutdown,
 }
@@ -99,6 +112,33 @@ pub enum BackendResponse {
         name: String,
         result: Result<std::path::PathBuf, String>,
     },
+    RetentionPreview {
+        result: Result<RetentionPreviewResult, String>,
+    },
+    RetentionExecuted {
+        result: Result<RetentionExecutionResult, String>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct RetentionCandidate {
+    pub id: String,
+    pub mailbox: String,
+    pub policy: String,
+    pub received_at: String,
+    pub from: String,
+    pub subject: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct RetentionPreviewResult {
+    pub candidates: Vec<RetentionCandidate>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RetentionExecutionResult {
+    pub deleted: usize,
+    pub failed_batches: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -315,6 +355,33 @@ fn backend_loop(
                     result,
                 });
             }
+            BackendCommand::MoveThread {
+                op_id,
+                thread_id,
+                to_mailbox_id,
+            } => {
+                let result = (|| {
+                    let emails = client
+                        .query_thread_emails(&thread_id)
+                        .map_err(|e| e.to_string())?;
+                    for email in emails {
+                        client
+                            .move_email(&email.id, &to_mailbox_id)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    Ok(())
+                })()
+                .map_err(|msg| {
+                    log_warn!("Failed to move thread {}: {}", thread_id, msg);
+                    msg
+                });
+                let _ = resp_tx.send(BackendResponse::EmailMutation {
+                    op_id,
+                    id: thread_id,
+                    action: EmailMutationAction::Move,
+                    result,
+                });
+            }
             BackendCommand::MarkThreadRead {
                 thread_id,
                 email_ids,
@@ -369,9 +436,168 @@ fn backend_loop(
 
                 let _ = resp_tx.send(BackendResponse::AttachmentDownloaded { name, result });
             }
+            BackendCommand::PreviewRetentionExpiry { policies } => {
+                let result = collect_retention_candidates(&client, &cached_mailboxes, &policies)
+                    .map(|candidates| RetentionPreviewResult { candidates });
+                let _ = resp_tx.send(BackendResponse::RetentionPreview { result });
+            }
+            BackendCommand::ExecuteRetentionExpiry { policies } => {
+                let result = execute_retention_expiry(&client, &cached_mailboxes, &policies);
+                let _ = resp_tx.send(BackendResponse::RetentionExecuted { result });
+            }
             BackendCommand::Shutdown => {
                 break;
             }
         }
     }
+}
+
+fn execute_retention_expiry(
+    client: &JmapClient,
+    mailboxes: &[Mailbox],
+    policies: &[RetentionPolicyConfig],
+) -> Result<RetentionExecutionResult, String> {
+    let candidates = collect_retention_candidates(client, mailboxes, policies)?;
+    let ids: Vec<String> = candidates.into_iter().map(|c| c.id).collect();
+    let mut deleted = 0usize;
+    let mut failed_batches = Vec::new();
+
+    for chunk in ids.chunks(50) {
+        match client.destroy_emails(chunk) {
+            Ok(()) => {
+                deleted += chunk.len();
+            }
+            Err(e) => {
+                failed_batches.push(format!("{} IDs: {}", chunk.len(), e));
+            }
+        }
+    }
+
+    Ok(RetentionExecutionResult {
+        deleted,
+        failed_batches,
+    })
+}
+
+fn collect_retention_candidates(
+    client: &JmapClient,
+    mailboxes: &[Mailbox],
+    policies: &[RetentionPolicyConfig],
+) -> Result<Vec<RetentionCandidate>, String> {
+    if policies.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let today_days = current_days_since_epoch()?;
+    let mut candidates = Vec::new();
+    let mut seen_email_ids = HashSet::new();
+
+    for policy in policies {
+        let Some(mailbox_id) = rules::resolve_mailbox_id(&policy.folder, mailboxes) else {
+            log_warn!(
+                "Retention policy '{}' skipped; cannot resolve folder '{}'",
+                policy.name,
+                policy.folder
+            );
+            continue;
+        };
+        let mailbox_name = mailboxes
+            .iter()
+            .find(|m| m.id == mailbox_id)
+            .map(|m| m.name.clone())
+            .unwrap_or_else(|| policy.folder.clone());
+        let cutoff_days = today_days - (policy.days as i64);
+
+        let mut position = 0u32;
+        loop {
+            let query = client
+                .query_emails_uncollapsed(&mailbox_id, 500, position)
+                .map_err(|e| e.to_string())?;
+            if query.ids.is_empty() {
+                break;
+            }
+
+            let emails = client.get_emails(&query.ids).map_err(|e| e.to_string())?;
+            for email in emails {
+                if !seen_email_ids.insert(email.id.clone()) {
+                    continue;
+                }
+                let Some(received_days) = email_received_days(&email) else {
+                    continue;
+                };
+                if received_days >= cutoff_days {
+                    continue;
+                }
+
+                let from = email
+                    .from
+                    .as_ref()
+                    .and_then(|f| f.first())
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|| "(unknown)".to_string());
+                let received_at = email
+                    .received_at
+                    .as_deref()
+                    .map(|d| d.chars().take(10).collect::<String>())
+                    .unwrap_or_else(|| "(unknown)".to_string());
+
+                candidates.push(RetentionCandidate {
+                    id: email.id,
+                    mailbox: mailbox_name.clone(),
+                    policy: policy.name.clone(),
+                    received_at,
+                    from,
+                    subject: email.subject.unwrap_or_else(|| "(no subject)".to_string()),
+                });
+            }
+
+            let loaded = query.ids.len() as u32;
+            position = query.position.saturating_add(loaded);
+            if loaded == 0 {
+                break;
+            }
+            if let Some(total) = query.total {
+                if position >= total {
+                    break;
+                }
+            }
+        }
+    }
+
+    candidates.sort_by(|a, b| {
+        a.received_at
+            .cmp(&b.received_at)
+            .then_with(|| a.mailbox.cmp(&b.mailbox))
+            .then_with(|| a.subject.cmp(&b.subject))
+    });
+    Ok(candidates)
+}
+
+fn current_days_since_epoch() -> Result<i64, String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("system clock error: {}", e))?;
+    Ok((now.as_secs() / 86_400) as i64)
+}
+
+fn email_received_days(email: &Email) -> Option<i64> {
+    let received = email.received_at.as_deref()?;
+    let y = received.get(0..4)?.parse::<i32>().ok()?;
+    let m = received.get(5..7)?.parse::<u32>().ok()?;
+    let d = received.get(8..10)?.parse::<u32>().ok()?;
+    ymd_to_days_since_epoch(y, m, d)
+}
+
+// Convert calendar date to day index since Unix epoch.
+fn ymd_to_days_since_epoch(year: i32, month: u32, day: u32) -> Option<i64> {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let y = year as i64 - if month <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = month as i64 + if month > 2 { -3 } else { 9 };
+    let doy = (153 * mp + 2) / 5 + day as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
 }

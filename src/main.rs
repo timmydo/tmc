@@ -92,6 +92,18 @@ page_size = 100           # optional: emails per page (default 500)
 mouse = true              # optional: enable mouse support (default true)
 sync_interval_secs = 60   # optional: background sync interval (default 60, 0 = off)
 
+[mail]
+archive_folder = "Archive"  # optional: target folder for 'a' archive action (default "archive")
+deleted_folder = "Trash"    # optional: target folder for 'd' delete action (default "trash")
+
+[retention.archive]
+folder = "Archive"
+days = 365                  # expire mail older than 365 days in Archive when pressing X
+
+[retention.trash]
+folder = "Trash"
+days = 30                   # expire mail older than 30 days in Trash when pressing X
+
 [account.personal]
 well_known_url = "https://mx.example.com/.well-known/jmap"
 username = "me@example.com"
@@ -108,6 +120,11 @@ Rules:
 - `well_known_url`, `username`, and `password_command` are required per account.
 - `password_command` is a shell command that prints the password to stdout.
 - Quoted strings support \", \\, \n, \t escapes.
+- `archive_folder` and `deleted_folder` are mailbox targets for `a` and `d` in list views.
+- `[retention.NAME]` sections are optional folder retention policies used by `x` (preview) and `X` (expire) in mailbox view.
+- Retention policy fields:
+  - `folder` (required): mailbox name, role, or path (e.g. "INBOX/Alerts")
+  - `days` (required): positive integer; emails older than this are deleted on `X`.
 
 Please ask me for my email provider, username, and how I store passwords, then generate a config file.
 "#,
@@ -311,6 +328,9 @@ fn main() {
         config.ui.editor,
         config.ui.mouse,
         config.ui.sync_interval_secs,
+        config.mail.archive_folder,
+        config.mail.deleted_folder,
+        config.mail.retention_policies,
         compiled_rules,
         custom_headers,
     ) {

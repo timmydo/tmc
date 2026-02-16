@@ -1,6 +1,7 @@
 use crate::backend::{BackendCommand, BackendResponse, EmailMutationAction};
 use crate::compose;
-use crate::jmap::types::Email;
+use crate::jmap::types::{Email, Mailbox};
+use crate::rules;
 use crate::tui::input::Key;
 use crate::tui::screen::Terminal;
 use crate::tui::views::email_view::EmailView;
@@ -11,8 +12,18 @@ use std::io;
 use std::sync::mpsc;
 
 enum PendingWriteOp {
-    Flag { email_id: String, old_flagged: bool },
-    Seen { email_id: String, old_seen: bool },
+    Flag {
+        email_id: String,
+        old_flagged: bool,
+    },
+    Seen {
+        email_id: String,
+        old_seen: bool,
+    },
+    Move {
+        email: Box<Email>,
+        from_index: usize,
+    },
 }
 
 pub struct ThreadView {
@@ -29,6 +40,9 @@ pub struct ThreadView {
     status_message: Option<String>,
     next_write_op_id: u64,
     pending_write_ops: HashMap<u64, PendingWriteOp>,
+    mailboxes: Vec<Mailbox>,
+    archive_folder: String,
+    deleted_folder: String,
 }
 
 impl ThreadView {
@@ -37,6 +51,9 @@ impl ThreadView {
         from_address: String,
         thread_id: String,
         subject: String,
+        mailboxes: Vec<Mailbox>,
+        archive_folder: String,
+        deleted_folder: String,
     ) -> Self {
         let _ = cmd_tx.send(BackendCommand::QueryThreadEmails {
             thread_id: thread_id.clone(),
@@ -55,6 +72,9 @@ impl ThreadView {
             status_message: None,
             next_write_op_id: 1,
             pending_write_ops: HashMap::new(),
+            mailboxes,
+            archive_folder,
+            deleted_folder,
         }
     }
 
@@ -142,6 +162,11 @@ impl ThreadView {
             PendingWriteOp::Seen { email_id, old_seen } => {
                 self.set_email_seen_state(&email_id, old_seen)
             }
+            PendingWriteOp::Move { email, from_index } => {
+                let insert_at = from_index.min(self.emails.len());
+                self.emails.insert(insert_at, *email);
+                self.cursor = insert_at;
+            }
         }
     }
 
@@ -195,6 +220,44 @@ impl ThreadView {
             self.scroll_offset = self.cursor;
         } else if self.cursor >= self.scroll_offset + max_items {
             self.scroll_offset = self.cursor - max_items + 1;
+        }
+    }
+
+    fn move_selected_to_folder(&mut self, folder: &str, action_label: &str) {
+        let Some(target_id) = rules::resolve_mailbox_id(folder, &self.mailboxes) else {
+            self.status_message = Some(format!(
+                "{} failed: could not resolve folder '{}'",
+                action_label, folder
+            ));
+            return;
+        };
+        let Some(email) = self.emails.get(self.cursor).cloned() else {
+            return;
+        };
+        let from_index = self.cursor;
+        let op_id = self.next_op_id();
+        self.pending_write_ops.insert(
+            op_id,
+            PendingWriteOp::Move {
+                email: Box::new(email.clone()),
+                from_index,
+            },
+        );
+        let send_result = self.cmd_tx.send(BackendCommand::MoveEmail {
+            op_id,
+            id: email.id.clone(),
+            to_mailbox_id: target_id,
+        });
+        self.emails.remove(from_index);
+        if self.cursor >= self.emails.len() && self.cursor > 0 {
+            self.cursor -= 1;
+        }
+        if let Err(e) = send_result {
+            self.pending_write_ops.remove(&op_id);
+            let insert_at = from_index.min(self.emails.len());
+            self.emails.insert(insert_at, email);
+            self.cursor = insert_at;
+            self.status_message = Some(format!("{} failed: {}", action_label, e));
         }
     }
 }
@@ -277,7 +340,7 @@ impl View for ThreadView {
             " q:back g:refresh".to_string()
         } else {
             format!(
-                " {}/{} | q:back n/p:nav RET:read g:refresh f:flag u:unread",
+                " {}/{} | q:back n/p:nav RET:read g:refresh a:archive d:delete f:flag u:unread",
                 self.cursor + 1,
                 self.emails.len()
             )
@@ -402,6 +465,16 @@ impl View for ThreadView {
                         self.status_message = Some(format!("Read state update failed: {}", e));
                     }
                 }
+                ViewAction::Continue
+            }
+            Key::Char('a') => {
+                let target = self.archive_folder.clone();
+                self.move_selected_to_folder(&target, "Archive");
+                ViewAction::Continue
+            }
+            Key::Char('d') => {
+                let target = self.deleted_folder.clone();
+                self.move_selected_to_folder(&target, "Delete");
                 ViewAction::Continue
             }
             Key::Char('c') => {
