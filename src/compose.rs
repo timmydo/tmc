@@ -186,7 +186,7 @@ fn format_address_list(addrs: &[crate::jmap::types::EmailAddress]) -> String {
         .join(", ")
 }
 
-fn extract_body_text(email: &crate::jmap::types::Email) -> String {
+pub(crate) fn extract_body_text(email: &crate::jmap::types::Email) -> String {
     if let Some(ref text_body) = email.text_body {
         for part in text_body {
             if let Some(value) = email.body_values.get(&part.part_id) {

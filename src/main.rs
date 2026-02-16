@@ -2,9 +2,11 @@
 mod log;
 
 mod backend;
+mod cli;
 mod compose;
 mod config;
 mod jmap;
+mod keybindings;
 mod rules;
 mod tui;
 
@@ -260,13 +262,15 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        eprintln!("Usage: tmc [--clear-log] [--log] [--print-rules] [--prompt=TOPIC]");
+        eprintln!("Usage: tmc [--clear-log] [--log] [--print-rules] [--prompt=TOPIC] [--cli] [--help-cli]");
         eprintln!();
         eprintln!("Options:");
         eprintln!("  --clear-log      Truncate the log file at startup");
         eprintln!("  --log            View the log file in $PAGER");
         eprintln!("  --print-rules    Parse and print rules.toml");
         eprintln!("  --prompt=TOPIC   Print an AI-friendly prompt (config, rules)");
+        eprintln!("  --cli            Run in JSON-over-stdin/stdout CLI mode");
+        eprintln!("  --help-cli       Print CLI mode protocol documentation");
         eprintln!("  --help           Show this help");
         std::process::exit(0);
     }
@@ -297,6 +301,11 @@ fn main() {
     if args.iter().any(|a| a == "--prompt") {
         eprintln!("Usage: --prompt=TOPIC (available topics: config, rules)");
         std::process::exit(1);
+    }
+
+    if args.iter().any(|a| a == "--help-cli") {
+        cli::print_help_cli();
+        std::process::exit(0);
     }
 
     log::init();
@@ -345,6 +354,23 @@ fn main() {
     } else {
         (Vec::new(), Vec::new())
     };
+
+    if args.iter().any(|a| a == "--cli") {
+        let archive_folder = config.mail.archive_folder.clone();
+        let deleted_folder = config.mail.deleted_folder.clone();
+        let rules_mailbox_regex = config.mail.rules_mailbox_regex.clone();
+        let my_email_regex = config.mail.my_email_regex.clone();
+        cli::run_cli(
+            config,
+            compiled_rules,
+            custom_headers,
+            rules_mailbox_regex,
+            my_email_regex,
+            archive_folder,
+            deleted_folder,
+        );
+        std::process::exit(0);
+    }
 
     let first_account = &config.accounts[0];
 
