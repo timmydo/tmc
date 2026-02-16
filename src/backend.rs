@@ -85,10 +85,12 @@ pub enum BackendCommand {
     PreviewRulesForMailbox {
         mailbox_id: String,
         mailbox_name: String,
+        loaded_email_ids: Vec<String>,
     },
     RunRulesForMailbox {
         mailbox_id: String,
         mailbox_name: String,
+        loaded_email_ids: Vec<String>,
     },
     Shutdown,
 }
@@ -590,13 +592,14 @@ fn backend_loop(
             BackendCommand::PreviewRulesForMailbox {
                 mailbox_id,
                 mailbox_name,
+                loaded_email_ids,
             } => {
                 let result = preview_rules_for_mailbox(
                     &client,
                     &cached_mailboxes,
                     &rules,
                     &custom_headers,
-                    &mailbox_id,
+                    &loaded_email_ids,
                 );
                 let _ = resp_tx.send(BackendResponse::RulesDryRun {
                     mailbox_id,
@@ -607,13 +610,14 @@ fn backend_loop(
             BackendCommand::RunRulesForMailbox {
                 mailbox_id,
                 mailbox_name,
+                loaded_email_ids,
             } => {
                 let result = run_rules_for_mailbox(
                     &client,
                     &cached_mailboxes,
                     &rules,
                     &custom_headers,
-                    &mailbox_id,
+                    &loaded_email_ids,
                 );
                 let _ = resp_tx.send(BackendResponse::RulesRun {
                     mailbox_id,
@@ -657,49 +661,23 @@ fn run_rules_for_mailbox(
     mailboxes: &[Mailbox],
     rules: &[CompiledRule],
     custom_headers: &[String],
-    mailbox_id: &str,
+    loaded_email_ids: &[String],
 ) -> Result<RulesRunResult, String> {
-    if rules.is_empty() {
+    if rules.is_empty() || loaded_email_ids.is_empty() {
         return Ok(RulesRunResult {
             scanned: 0,
             matched_rules: 0,
             actions: 0,
         });
     }
-    let mut position = 0u32;
-    let mut scanned = 0usize;
-    let mut matched_rules = 0usize;
-    let mut actions = 0usize;
 
-    loop {
-        let query = client
-            .query_emails_uncollapsed(mailbox_id, 500, position)
-            .map_err(|e| e.to_string())?;
-        if query.ids.is_empty() {
-            break;
-        }
-
-        let emails = fetch_emails_chunked(client, &query.ids, custom_headers)?;
-
-        scanned += emails.len();
-
-        let applications = rules::apply_rules(rules, &emails, mailboxes);
-        if !applications.is_empty() {
-            matched_rules += applications.len();
-            actions += applications.iter().map(|a| a.actions.len()).sum::<usize>();
-            rules::execute_rule_actions(&applications, mailboxes, client);
-        }
-
-        let loaded = query.ids.len() as u32;
-        position = query.position.saturating_add(loaded);
-        if loaded == 0 {
-            break;
-        }
-        if let Some(total) = query.total {
-            if position >= total {
-                break;
-            }
-        }
+    let emails = fetch_emails_chunked(client, loaded_email_ids, custom_headers)?;
+    let scanned = emails.len();
+    let applications = rules::apply_rules(rules, &emails, mailboxes);
+    let matched_rules = applications.len();
+    let actions = applications.iter().map(|a| a.actions.len()).sum::<usize>();
+    if !applications.is_empty() {
+        rules::execute_rule_actions(&applications, mailboxes, client);
     }
 
     Ok(RulesRunResult {
@@ -714,9 +692,9 @@ fn preview_rules_for_mailbox(
     mailboxes: &[Mailbox],
     rules: &[CompiledRule],
     custom_headers: &[String],
-    mailbox_id: &str,
+    loaded_email_ids: &[String],
 ) -> Result<RulesDryRunResult, String> {
-    if rules.is_empty() {
+    if rules.is_empty() || loaded_email_ids.is_empty() {
         return Ok(RulesDryRunResult {
             scanned: 0,
             matched_rules: 0,
@@ -724,67 +702,40 @@ fn preview_rules_for_mailbox(
             entries: Vec::new(),
         });
     }
-    let mut position = 0u32;
-    let mut scanned = 0usize;
-    let mut matched_rules = 0usize;
-    let mut actions = 0usize;
+
+    let emails = fetch_emails_chunked(client, loaded_email_ids, custom_headers)?;
+    let scanned = emails.len();
     let mut entries = Vec::new();
+    let email_by_id: HashMap<String, &Email> = emails.iter().map(|e| (e.id.clone(), e)).collect();
+    let applications = rules::apply_rules(rules, &emails, mailboxes);
+    let matched_rules = applications.len();
+    let actions = applications.iter().map(|a| a.actions.len()).sum::<usize>();
 
-    loop {
-        let query = client
-            .query_emails_uncollapsed(mailbox_id, 500, position)
-            .map_err(|e| e.to_string())?;
-        if query.ids.is_empty() {
-            break;
-        }
-
-        let emails = fetch_emails_chunked(client, &query.ids, custom_headers)?;
-
-        scanned += emails.len();
-
-        let email_by_id: HashMap<String, &Email> =
-            emails.iter().map(|e| (e.id.clone(), e)).collect();
-        let applications = rules::apply_rules(rules, &emails, mailboxes);
-        matched_rules += applications.len();
-        actions += applications.iter().map(|a| a.actions.len()).sum::<usize>();
-
-        for app in applications {
-            if let Some(email) = email_by_id.get(&app.email_id) {
-                let from = email
-                    .from
-                    .as_ref()
-                    .and_then(|f| f.first())
-                    .map(|a| a.to_string())
-                    .unwrap_or_else(|| "(unknown)".to_string());
-                let received_at = email
-                    .received_at
-                    .as_deref()
-                    .map(|d| d.chars().take(10).collect::<String>())
-                    .unwrap_or_else(|| "(unknown)".to_string());
-                let subject = email
-                    .subject
-                    .clone()
-                    .unwrap_or_else(|| "(no subject)".to_string());
-                let action_names = app.actions.iter().map(format_rule_action).collect();
-                entries.push(RulesDryRunEntry {
-                    received_at,
-                    from,
-                    subject,
-                    rule_name: app.rule_name,
-                    actions: action_names,
-                });
-            }
-        }
-
-        let loaded = query.ids.len() as u32;
-        position = query.position.saturating_add(loaded);
-        if loaded == 0 {
-            break;
-        }
-        if let Some(total) = query.total {
-            if position >= total {
-                break;
-            }
+    for app in applications {
+        if let Some(email) = email_by_id.get(&app.email_id) {
+            let from = email
+                .from
+                .as_ref()
+                .and_then(|f| f.first())
+                .map(|a| a.to_string())
+                .unwrap_or_else(|| "(unknown)".to_string());
+            let received_at = email
+                .received_at
+                .as_deref()
+                .map(|d| d.chars().take(10).collect::<String>())
+                .unwrap_or_else(|| "(unknown)".to_string());
+            let subject = email
+                .subject
+                .clone()
+                .unwrap_or_else(|| "(no subject)".to_string());
+            let action_names = app.actions.iter().map(format_rule_action).collect();
+            entries.push(RulesDryRunEntry {
+                received_at,
+                from,
+                subject,
+                rule_name: app.rule_name,
+                actions: action_names,
+            });
         }
     }
 
