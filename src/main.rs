@@ -239,7 +239,7 @@ Available actions:
 Conditions support: header/regex, all = [...], any = [...], not = {{...}}
 
 By default, only the first matching rule applies per email. Set `continue_processing = true` to allow subsequent rules to also match.
-Set `skip_if_to_me = true` to only apply a rule when `mail.my_email_regex` matches To or Cc.
+Set `skip_if_to_me = true` to skip a rule when `mail.my_email_regex` matches To or Cc.
 
 Please ask me what kinds of emails I receive and how I want them organized, then generate a rules file.
 "#,

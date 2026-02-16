@@ -356,9 +356,9 @@ pub fn apply_rules(
     for email in emails {
         log_debug!("[Rules] Evaluating email {}", email.id);
         for rule in rules {
-            if rule.skip_if_to_me && !is_email_to_me(email, my_email_regex) {
+            if rule.skip_if_to_me && is_email_to_me(email, my_email_regex) {
                 log_debug!(
-                    "[Rules] Email {} skipping rule '{}' because skip_if_to_me=true and To/Cc does not match '{}'",
+                    "[Rules] Email {} skipping rule '{}' because skip_if_to_me=true and To/Cc matches '{}'",
                     email.id,
                     rule.name,
                     my_email_regex.as_str()
@@ -1116,7 +1116,7 @@ mark_read = true
     }
 
     #[test]
-    fn test_skip_if_to_me_requires_to_or_cc_match() {
+    fn test_skip_if_to_me_does_not_skip_when_to_or_cc_does_not_match() {
         let toml_str = r#"
 [[rule]]
 name = "match if addressed to me"
@@ -1138,11 +1138,11 @@ flag = true
         let email = make_email("e1");
         let my_email_regex = Regex::new("(?i)me@example\\.com").unwrap();
         let apps = apply_rules(&rules, &[email], &[], &my_email_regex);
-        assert!(apps.is_empty());
+        assert_eq!(apps.len(), 1);
     }
 
     #[test]
-    fn test_skip_if_to_me_matches_to_or_cc() {
+    fn test_skip_if_to_me_skips_when_to_or_cc_matches() {
         let toml_str = r#"
 [[rule]]
 name = "match if addressed to me"
@@ -1168,7 +1168,37 @@ flag = true
         }]);
         let my_email_regex = Regex::new("(?i)me@example\\.com").unwrap();
         let apps = apply_rules(&rules, &[email], &[], &my_email_regex);
-        assert_eq!(apps.len(), 1);
+        assert!(apps.is_empty());
+    }
+
+    #[test]
+    fn test_skip_if_to_me_skips_when_cc_matches() {
+        let toml_str = r#"
+[[rule]]
+name = "match if addressed to me"
+skip_if_to_me = true
+[rule.match]
+header = "From"
+regex = "alice@"
+[rule.actions]
+flag = true
+"#;
+        let config: RulesConfig = toml::from_str(toml_str).unwrap();
+        let rules: Vec<CompiledRule> = config
+            .rule
+            .into_iter()
+            .map(compile_rule)
+            .collect::<Result<_, _>>()
+            .unwrap();
+
+        let mut email = make_email("e1");
+        email.cc = Some(vec![EmailAddress {
+            name: Some("Timmy".to_string()),
+            email: Some("me@example.com".to_string()),
+        }]);
+        let my_email_regex = Regex::new("(?i)me@example\\.com").unwrap();
+        let apps = apply_rules(&rules, &[email], &[], &my_email_regex);
+        assert!(apps.is_empty());
     }
 
     #[test]
