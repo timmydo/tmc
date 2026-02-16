@@ -26,6 +26,50 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+/// Word-wrap a line at `max_width` characters, preferring to break at spaces.
+fn wrap_line(s: &str, max_width: usize) -> Vec<&str> {
+    if max_width == 0 || s.is_empty() {
+        return vec![s];
+    }
+
+    let char_len = s.chars().count();
+    if char_len <= max_width {
+        return vec![s];
+    }
+
+    let mut result = Vec::new();
+    let mut remaining = s;
+
+    while !remaining.is_empty() {
+        let char_len = remaining.chars().count();
+        if char_len <= max_width {
+            result.push(remaining);
+            break;
+        }
+
+        // Find the byte position of the max_width-th character
+        let byte_end = remaining
+            .char_indices()
+            .nth(max_width)
+            .map(|(pos, _)| pos)
+            .unwrap_or(remaining.len());
+
+        let segment = &remaining[..byte_end];
+
+        // Try to find a space to break at
+        if let Some(space_pos) = segment.rfind(' ') {
+            result.push(&remaining[..space_pos]);
+            remaining = &remaining[space_pos + 1..];
+        } else {
+            // Hard break at max_width
+            result.push(segment);
+            remaining = &remaining[byte_end..];
+        }
+    }
+
+    result
+}
+
 enum PendingWriteOp {
     Flag { old_flagged: bool },
     Seen { old_seen: bool },
@@ -418,16 +462,13 @@ impl View for EmailView {
         }
 
         let visible_rows = (term.rows as usize).saturating_sub(1);
+        let width = term.cols as usize;
 
-        for (i, line) in self
-            .lines
-            .iter()
-            .skip(self.scroll)
-            .enumerate()
-            .take(visible_rows)
-        {
-            let row = 1 + i as u16;
-            term.move_to(row, 1)?;
+        let mut row_idx = 0;
+        for (i, line) in self.lines.iter().skip(self.scroll).enumerate() {
+            if row_idx >= visible_rows {
+                break;
+            }
 
             let abs_idx = self.scroll + i;
             let kind = self
@@ -438,19 +479,39 @@ impl View for EmailView {
 
             match kind {
                 LineKind::Header => {
+                    let row = 1 + row_idx as u16;
+                    term.move_to(row, 1)?;
                     term.set_bold()?;
                     term.write_truncated(line, term.cols)?;
                     term.reset_attr()?;
+                    row_idx += 1;
                 }
                 LineKind::Separator => {
+                    let row = 1 + row_idx as u16;
+                    term.move_to(row, 1)?;
                     // White background bar spanning entire width
                     term.set_reverse()?;
-                    let pad = " ".repeat(term.cols as usize);
+                    let pad = " ".repeat(width);
                     term.write_str(&pad)?;
                     term.reset_attr()?;
+                    row_idx += 1;
                 }
                 LineKind::Body => {
-                    term.write_truncated(line, term.cols)?;
+                    if line.is_empty() {
+                        let row = 1 + row_idx as u16;
+                        term.move_to(row, 1)?;
+                        row_idx += 1;
+                    } else {
+                        for segment in wrap_line(line, width) {
+                            if row_idx >= visible_rows {
+                                break;
+                            }
+                            let row = 1 + row_idx as u16;
+                            term.move_to(row, 1)?;
+                            term.write_truncated(segment, term.cols)?;
+                            row_idx += 1;
+                        }
+                    }
                 }
             }
         }
