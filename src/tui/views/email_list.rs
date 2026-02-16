@@ -1,4 +1,4 @@
-use crate::backend::{BackendCommand, BackendResponse, EmailMutationAction};
+use crate::backend::{BackendCommand, BackendResponse, EmailMutationAction, RulesDryRunResult};
 use crate::compose;
 use crate::jmap::types::{Email, Mailbox};
 use crate::rules;
@@ -6,6 +6,7 @@ use crate::tui::input::Key;
 use crate::tui::screen::Terminal;
 use crate::tui::views::email_view::EmailView;
 use crate::tui::views::help::HelpView;
+use crate::tui::views::rules_preview::RulesPreviewView;
 use crate::tui::views::thread_view::ThreadView;
 use crate::tui::views::{View, ViewAction};
 use std::collections::{HashMap, HashSet};
@@ -42,6 +43,9 @@ pub struct EmailListView {
     loading_more: bool,
     error: Option<String>,
     pending_click: bool,
+    pending_reply_all_email_id: Option<String>,
+    pending_compose: Option<String>,
+    pending_rules_preview: Option<(String, RulesDryRunResult)>,
     mailboxes: Vec<Mailbox>,
     move_mode: bool,
     move_cursor: usize,
@@ -83,6 +87,9 @@ impl EmailListView {
             loading_more: false,
             error: None,
             pending_click: false,
+            pending_reply_all_email_id: None,
+            pending_compose: None,
+            pending_rules_preview: None,
             mailboxes,
             move_mode: false,
             move_cursor: 0,
@@ -659,7 +666,7 @@ impl View for EmailListView {
                 ""
             };
             format!(
-                " {}/{} | q:back n/p:nav RET:read g:refresh a:archive d:delete{} f:flag u:unread m:move s:search{}{}",
+                " {}/{} | q:back n/p:nav RET:read g:refresh R:reply-all e:dry-run E:run-rules a:archive d:delete{} f:flag u:unread m:move s:search{}{}",
                 self.cursor + 1,
                 self.emails.len(),
                 expire_hint,
@@ -839,6 +846,47 @@ impl View for EmailListView {
                 self.request_refresh();
                 ViewAction::Continue
             }
+            Key::Char('R') => {
+                if let Some(email) = self.emails.get(self.cursor) {
+                    self.pending_reply_all_email_id = Some(email.id.clone());
+                    if let Err(e) = self.cmd_tx.send(BackendCommand::GetEmailForReply {
+                        id: email.id.clone(),
+                    }) {
+                        self.pending_reply_all_email_id = None;
+                        self.status_message = Some(format!("Reply all failed to send: {}", e));
+                    } else {
+                        self.status_message = Some("Preparing reply-all draft...".to_string());
+                    }
+                }
+                ViewAction::Continue
+            }
+            Key::Char('e') => {
+                let mailbox_id = self.mailbox_id.clone();
+                let mailbox_name = self.mailbox_name.clone();
+                if let Err(e) = self.cmd_tx.send(BackendCommand::PreviewRulesForMailbox {
+                    mailbox_id,
+                    mailbox_name: mailbox_name.clone(),
+                }) {
+                    self.status_message = Some(format!("Rules dry-run failed to send: {}", e));
+                } else {
+                    self.status_message =
+                        Some(format!("Running rules dry-run in '{}'", mailbox_name));
+                }
+                ViewAction::Continue
+            }
+            Key::Char('E') => {
+                let mailbox_id = self.mailbox_id.clone();
+                let mailbox_name = self.mailbox_name.clone();
+                if let Err(e) = self.cmd_tx.send(BackendCommand::RunRulesForMailbox {
+                    mailbox_id,
+                    mailbox_name: mailbox_name.clone(),
+                }) {
+                    self.status_message = Some(format!("Run rules failed to send: {}", e));
+                } else {
+                    self.status_message = Some(format!("Running rules in '{}'", mailbox_name));
+                }
+                ViewAction::Continue
+            }
             Key::Char('f') => {
                 if let Some(email) = self.emails.get(self.cursor) {
                     let email_id = email.id.clone();
@@ -986,6 +1034,15 @@ impl View for EmailListView {
     }
 
     fn take_pending_action(&mut self) -> Option<ViewAction> {
+        if let Some(draft) = self.pending_compose.take() {
+            return Some(ViewAction::Compose(draft));
+        }
+        if let Some((mailbox_name, preview)) = self.pending_rules_preview.take() {
+            return Some(ViewAction::Push(Box::new(RulesPreviewView::new(
+                mailbox_name,
+                preview,
+            ))));
+        }
         if self.pending_click {
             self.pending_click = false;
             return self.open_selected();
@@ -1070,6 +1127,23 @@ impl View for EmailListView {
                     false
                 }
             }
+            BackendResponse::EmailForReply { id, result } => {
+                if self.pending_reply_all_email_id.as_deref() == Some(id.as_str()) {
+                    self.pending_reply_all_email_id = None;
+                    match result.as_ref() {
+                        Ok(email) => {
+                            let draft = compose::build_reply_draft(email, true, &self.from_address);
+                            self.pending_compose = Some(draft);
+                        }
+                        Err(e) => {
+                            self.status_message = Some(format!("Reply all failed: {}", e));
+                        }
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
             BackendResponse::ThreadMarkedRead { result, .. } => {
                 if result.is_ok() {
                     self.request_refresh();
@@ -1077,6 +1151,44 @@ impl View for EmailListView {
                 } else {
                     false
                 }
+            }
+            BackendResponse::RulesDryRun {
+                mailbox_id,
+                mailbox_name,
+                result,
+            } if *mailbox_id == self.mailbox_id => {
+                match result {
+                    Ok(preview) => {
+                        self.status_message = Some(format!(
+                            "Rules dry-run in '{}': scanned {}, matched {}, actions {}",
+                            mailbox_name, preview.scanned, preview.matched_rules, preview.actions
+                        ));
+                        self.pending_rules_preview = Some((mailbox_name.clone(), preview.clone()));
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Rules dry-run failed: {}", e));
+                    }
+                }
+                true
+            }
+            BackendResponse::RulesRun {
+                mailbox_id,
+                mailbox_name,
+                result,
+            } if *mailbox_id == self.mailbox_id => {
+                match result {
+                    Ok(summary) => {
+                        self.status_message = Some(format!(
+                            "Rules run in '{}': scanned {}, matched {}, actions {}",
+                            mailbox_name, summary.scanned, summary.matched_rules, summary.actions
+                        ));
+                        self.request_refresh();
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Rules run failed: {}", e));
+                    }
+                }
+                true
             }
             _ => false,
         }

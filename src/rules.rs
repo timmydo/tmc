@@ -91,6 +91,34 @@ pub fn load_rules(path: &Path) -> Result<Vec<CompiledRule>, String> {
         .collect::<Result<Vec<_>, _>>()
 }
 
+pub fn format_rules_for_display(rules: &[CompiledRule]) -> String {
+    if rules.is_empty() {
+        return "No rules defined.".to_string();
+    }
+
+    let mut out = String::new();
+    for (idx, rule) in rules.iter().enumerate() {
+        out.push_str(&format!("Rule {}: {}\n", idx + 1, rule.name));
+        out.push_str(&format!(
+            "  Continue processing: {}\n",
+            if rule.continue_processing {
+                "yes"
+            } else {
+                "no"
+            }
+        ));
+        out.push_str(&format!(
+            "  Match: {}\n",
+            format_condition_for_display(&rule.condition)
+        ));
+        out.push_str(&format!(
+            "  Actions: {}\n",
+            format_actions_for_display(&rule.actions)
+        ));
+    }
+    out
+}
+
 fn compile_rule(def: RuleDef) -> Result<CompiledRule, String> {
     let actions = compile_actions(&def.actions);
     let condition = compile_condition(def.match_condition)
@@ -102,6 +130,50 @@ fn compile_rule(def: RuleDef) -> Result<CompiledRule, String> {
         actions,
         condition,
     })
+}
+
+fn format_condition_for_display(condition: &CompiledCondition) -> String {
+    match condition {
+        CompiledCondition::Header { header, regex } => {
+            format!("{} =~ /{}/", header, regex.as_str())
+        }
+        CompiledCondition::All(conditions) => {
+            let parts: Vec<String> = conditions
+                .iter()
+                .map(format_condition_for_display)
+                .collect();
+            format!("all({})", parts.join(", "))
+        }
+        CompiledCondition::Any(conditions) => {
+            let parts: Vec<String> = conditions
+                .iter()
+                .map(format_condition_for_display)
+                .collect();
+            format!("any({})", parts.join(", "))
+        }
+        CompiledCondition::Not(inner) => {
+            format!("not({})", format_condition_for_display(inner))
+        }
+    }
+}
+
+fn format_actions_for_display(actions: &[Action]) -> String {
+    if actions.is_empty() {
+        return "(none)".to_string();
+    }
+
+    let parts: Vec<String> = actions
+        .iter()
+        .map(|a| match a {
+            Action::MarkRead => "mark_read".to_string(),
+            Action::MarkUnread => "mark_unread".to_string(),
+            Action::Flag => "flag".to_string(),
+            Action::Unflag => "unflag".to_string(),
+            Action::Move { target } => format!("move_to={}", target),
+            Action::Delete => "delete".to_string(),
+        })
+        .collect();
+    parts.join(", ")
 }
 
 fn compile_actions(def: &ActionsDef) -> Vec<Action> {

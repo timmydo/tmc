@@ -81,6 +81,14 @@ pub enum BackendCommand {
     ExecuteRetentionExpiry {
         policies: Vec<RetentionPolicyConfig>,
     },
+    PreviewRulesForMailbox {
+        mailbox_id: String,
+        mailbox_name: String,
+    },
+    RunRulesForMailbox {
+        mailbox_id: String,
+        mailbox_name: String,
+    },
     Shutdown,
 }
 
@@ -141,6 +149,16 @@ pub enum BackendResponse {
     RetentionExecuted {
         result: Result<RetentionExecutionResult, String>,
     },
+    RulesDryRun {
+        mailbox_id: String,
+        mailbox_name: String,
+        result: Result<RulesDryRunResult, String>,
+    },
+    RulesRun {
+        mailbox_id: String,
+        mailbox_name: String,
+        result: Result<RulesRunResult, String>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -162,6 +180,30 @@ pub struct RetentionPreviewResult {
 pub struct RetentionExecutionResult {
     pub deleted: usize,
     pub failed_batches: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RulesRunResult {
+    pub scanned: usize,
+    pub matched_rules: usize,
+    pub actions: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct RulesDryRunEntry {
+    pub received_at: String,
+    pub from: String,
+    pub subject: String,
+    pub rule_name: String,
+    pub actions: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RulesDryRunResult {
+    pub scanned: usize,
+    pub matched_rules: usize,
+    pub actions: usize,
+    pub entries: Vec<RulesDryRunEntry>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -243,12 +285,8 @@ fn backend_loop(
                     let loaded = query.ids.len() as u32;
                     let emails = if query.ids.is_empty() {
                         Ok(Vec::new())
-                    } else if !custom_headers.is_empty() {
-                        client
-                            .get_emails_with_extra_properties(&query.ids, &custom_headers)
-                            .map_err(|e| e.to_string())
                     } else {
-                        client.get_emails(&query.ids).map_err(|e| e.to_string())
+                        fetch_emails_chunked(&client, &query.ids, &custom_headers)
                     }?;
 
                     // Apply filtering rules
@@ -520,10 +558,225 @@ fn backend_loop(
                 let result = execute_retention_expiry(&client, &cached_mailboxes, &policies);
                 let _ = resp_tx.send(BackendResponse::RetentionExecuted { result });
             }
+            BackendCommand::PreviewRulesForMailbox {
+                mailbox_id,
+                mailbox_name,
+            } => {
+                let result = preview_rules_for_mailbox(
+                    &client,
+                    &cached_mailboxes,
+                    &rules,
+                    &custom_headers,
+                    &mailbox_id,
+                );
+                let _ = resp_tx.send(BackendResponse::RulesDryRun {
+                    mailbox_id,
+                    mailbox_name,
+                    result,
+                });
+            }
+            BackendCommand::RunRulesForMailbox {
+                mailbox_id,
+                mailbox_name,
+            } => {
+                let result = run_rules_for_mailbox(
+                    &client,
+                    &cached_mailboxes,
+                    &rules,
+                    &custom_headers,
+                    &mailbox_id,
+                );
+                let _ = resp_tx.send(BackendResponse::RulesRun {
+                    mailbox_id,
+                    mailbox_name,
+                    result,
+                });
+            }
             BackendCommand::Shutdown => {
                 break;
             }
         }
+    }
+}
+
+const EMAIL_GET_CHUNK_SIZE: usize = 100;
+
+fn fetch_emails_chunked(
+    client: &JmapClient,
+    ids: &[String],
+    custom_headers: &[String],
+) -> Result<Vec<Email>, String> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(EMAIL_GET_CHUNK_SIZE) {
+        let mut batch = if custom_headers.is_empty() {
+            client.get_emails(chunk)
+        } else {
+            client.get_emails_with_extra_properties(chunk, custom_headers)
+        }
+        .map_err(|e| e.to_string())?;
+        out.append(&mut batch);
+    }
+    Ok(out)
+}
+
+fn run_rules_for_mailbox(
+    client: &JmapClient,
+    mailboxes: &[Mailbox],
+    rules: &[CompiledRule],
+    custom_headers: &[String],
+    mailbox_id: &str,
+) -> Result<RulesRunResult, String> {
+    if rules.is_empty() {
+        return Ok(RulesRunResult {
+            scanned: 0,
+            matched_rules: 0,
+            actions: 0,
+        });
+    }
+
+    let mut position = 0u32;
+    let mut scanned = 0usize;
+    let mut matched_rules = 0usize;
+    let mut actions = 0usize;
+
+    loop {
+        let query = client
+            .query_emails_uncollapsed(mailbox_id, 500, position)
+            .map_err(|e| e.to_string())?;
+        if query.ids.is_empty() {
+            break;
+        }
+
+        let emails = fetch_emails_chunked(client, &query.ids, custom_headers)?;
+
+        scanned += emails.len();
+
+        let applications = rules::apply_rules(rules, &emails, mailboxes);
+        if !applications.is_empty() {
+            matched_rules += applications.len();
+            actions += applications.iter().map(|a| a.actions.len()).sum::<usize>();
+            rules::execute_rule_actions(&applications, mailboxes, client);
+        }
+
+        let loaded = query.ids.len() as u32;
+        position = query.position.saturating_add(loaded);
+        if loaded == 0 {
+            break;
+        }
+        if let Some(total) = query.total {
+            if position >= total {
+                break;
+            }
+        }
+    }
+
+    Ok(RulesRunResult {
+        scanned,
+        matched_rules,
+        actions,
+    })
+}
+
+fn preview_rules_for_mailbox(
+    client: &JmapClient,
+    mailboxes: &[Mailbox],
+    rules: &[CompiledRule],
+    custom_headers: &[String],
+    mailbox_id: &str,
+) -> Result<RulesDryRunResult, String> {
+    if rules.is_empty() {
+        return Ok(RulesDryRunResult {
+            scanned: 0,
+            matched_rules: 0,
+            actions: 0,
+            entries: Vec::new(),
+        });
+    }
+
+    let mut position = 0u32;
+    let mut scanned = 0usize;
+    let mut matched_rules = 0usize;
+    let mut actions = 0usize;
+    let mut entries = Vec::new();
+
+    loop {
+        let query = client
+            .query_emails_uncollapsed(mailbox_id, 500, position)
+            .map_err(|e| e.to_string())?;
+        if query.ids.is_empty() {
+            break;
+        }
+
+        let emails = fetch_emails_chunked(client, &query.ids, custom_headers)?;
+
+        scanned += emails.len();
+
+        let email_by_id: HashMap<String, &Email> =
+            emails.iter().map(|e| (e.id.clone(), e)).collect();
+        let applications = rules::apply_rules(rules, &emails, mailboxes);
+        matched_rules += applications.len();
+        actions += applications.iter().map(|a| a.actions.len()).sum::<usize>();
+
+        for app in applications {
+            if let Some(email) = email_by_id.get(&app.email_id) {
+                let from = email
+                    .from
+                    .as_ref()
+                    .and_then(|f| f.first())
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|| "(unknown)".to_string());
+                let received_at = email
+                    .received_at
+                    .as_deref()
+                    .map(|d| d.chars().take(10).collect::<String>())
+                    .unwrap_or_else(|| "(unknown)".to_string());
+                let subject = email
+                    .subject
+                    .clone()
+                    .unwrap_or_else(|| "(no subject)".to_string());
+                let action_names = app.actions.iter().map(format_rule_action).collect();
+                entries.push(RulesDryRunEntry {
+                    received_at,
+                    from,
+                    subject,
+                    rule_name: app.rule_name,
+                    actions: action_names,
+                });
+            }
+        }
+
+        let loaded = query.ids.len() as u32;
+        position = query.position.saturating_add(loaded);
+        if loaded == 0 {
+            break;
+        }
+        if let Some(total) = query.total {
+            if position >= total {
+                break;
+            }
+        }
+    }
+
+    Ok(RulesDryRunResult {
+        scanned,
+        matched_rules,
+        actions,
+        entries,
+    })
+}
+
+fn format_rule_action(action: &rules::Action) -> String {
+    match action {
+        rules::Action::MarkRead => "mark_read".to_string(),
+        rules::Action::MarkUnread => "mark_unread".to_string(),
+        rules::Action::Flag => "flag".to_string(),
+        rules::Action::Unflag => "unflag".to_string(),
+        rules::Action::Move { target } => format!("move_to={}", target),
+        rules::Action::Delete => "delete".to_string(),
     }
 }
 
@@ -592,7 +845,7 @@ fn collect_retention_candidates(
                 break;
             }
 
-            let emails = client.get_emails(&query.ids).map_err(|e| e.to_string())?;
+            let emails = fetch_emails_chunked(client, &query.ids, &[])?;
             for email in emails {
                 if !seen_email_ids.insert(email.id.clone()) {
                     continue;

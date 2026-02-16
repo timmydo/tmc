@@ -74,6 +74,34 @@ fn show_log() {
     }
 }
 
+fn print_rules() {
+    let config_path = default_config_path();
+    let rules_path = config_path
+        .parent()
+        .map(|p| p.join("rules.toml"))
+        .unwrap_or_else(|| PathBuf::from("rules.toml"));
+
+    if !rules_path.exists() {
+        eprintln!("No rules file found at {}", rules_path.display());
+        std::process::exit(1);
+    }
+
+    let loaded = match rules::load_rules(&rules_path) {
+        Ok(rules) => rules,
+        Err(e) => {
+            eprintln!("Failed to load rules from {}: {}", rules_path.display(), e);
+            std::process::exit(1);
+        }
+    };
+    let custom_headers = rules::extract_custom_headers(&loaded);
+
+    println!("Rules file: {}", rules_path.display());
+    println!("Rules loaded: {}", loaded.len());
+    println!("Custom headers requested: {}", custom_headers.len());
+    println!();
+    print!("{}", rules::format_rules_for_display(&loaded));
+}
+
 fn print_prompt(topic: &str) {
     match topic {
         "config" => {
@@ -226,10 +254,11 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        eprintln!("Usage: tmc [--log] [--prompt=TOPIC]");
+        eprintln!("Usage: tmc [--log] [--print-rules] [--prompt=TOPIC]");
         eprintln!();
         eprintln!("Options:");
         eprintln!("  --log            View the log file in $PAGER");
+        eprintln!("  --print-rules    Parse and print rules.toml");
         eprintln!("  --prompt=TOPIC   Print an AI-friendly prompt (config, rules)");
         eprintln!("  --help           Show this help");
         std::process::exit(0);
@@ -237,6 +266,11 @@ fn main() {
 
     if args.iter().any(|a| a == "--log") {
         show_log();
+        std::process::exit(0);
+    }
+
+    if args.iter().any(|a| a == "--print-rules") {
+        print_rules();
         std::process::exit(0);
     }
 
