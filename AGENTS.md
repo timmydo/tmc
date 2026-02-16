@@ -22,6 +22,8 @@ Runtime options:
 ```bash
 tmc --help
 tmc --log
+tmc --cli             # JSON-over-stdin/stdout CLI mode (NDJSON)
+tmc --help-cli        # print CLI protocol documentation
 tmc --prompt=config   # print AI-friendly prompt for generating config
 tmc --prompt=rules    # print AI-friendly prompt for generating rules
 ```
@@ -56,21 +58,34 @@ Credentials are fetched by running `password_command`; there is no interactive p
 
 ## Architecture
 
-- `src/main.rs`: CLI flags (`--help`, `--log`, `--prompt=TOPIC`), config loading, first-account connect, TUI bootstrap.
+- `src/main.rs`: CLI flags (`--help`, `--log`, `--cli`, `--help-cli`, `--prompt=TOPIC`), config loading, first-account connect, TUI bootstrap.
 - `src/config.rs`: lightweight TOML-like parser for `[ui]`, `[jmap]`, and `[account.NAME]`.
 - `src/backend.rs`: single backend worker thread + `mpsc` command/response channels.
 - `src/jmap/client.rs`: blocking JMAP client (`ureq`), discovery + mail operations.
 - `src/jmap/types.rs`: serde-backed JMAP models.
 - `src/tui/`: raw terminal setup, input parsing, view stack, mailbox/email/help views.
+- `src/cli.rs`: JSON-over-stdin/stdout CLI mode (NDJSON protocol), alternative UI reusing the same backend thread.
+- `src/keybindings.rs`: centralized keybinding dictionary (`KeyBinding` struct + `all_keybindings()`), used by CLI export and `--help-cli`.
 - `src/compose.rs`: compose/reply/forward draft generation and secure temp draft files.
 - `src/log.rs`: file logging and `--log` support.
 
 ### Threading model
 
-- UI loop runs on the main thread.
+- UI loop runs on the main thread (TUI) or reads stdin line-by-line (CLI).
 - JMAP operations run on one backend thread.
-- UI communicates with backend over `std::sync::mpsc`.
-- UI applies optimistic updates for some actions (read/unread, flag, move) before backend confirmation.
+- Both TUI and CLI communicate with backend over `std::sync::mpsc` using the same `BackendCommand`/`BackendResponse` enums.
+- TUI applies optimistic updates for some actions (read/unread, flag, move) before backend confirmation.
+- CLI blocks synchronously on `resp_rx.recv()` for each command.
+
+### CLI mode (`--cli`)
+
+An alternative UI that speaks NDJSON (one JSON object per line) over stdin/stdout. It reuses the same backend thread and `BackendCommand`/`BackendResponse` protocol as the TUI, making it suitable for programmatic interaction and integration testing.
+
+Supported commands: `list_accounts`, `connect`, `status`, `list_mailboxes`, `create_mailbox`, `delete_mailbox`, `query_emails`, `get_email`, `get_thread`, `mark_read`, `mark_unread`, `flag`, `unflag`, `move_email`, `archive`, `delete_email`, `destroy`, `mark_mailbox_read`, `get_raw_headers`, `download_attachment`, `compose_draft`, `reply_draft`, `forward_draft`, `keybindings`.
+
+Response envelope: `{"ok": true, ...data}` or `{"ok": false, "error": "message"}`.
+
+Context control for email viewing: `max_body_chars` (truncate body), `headers_only` (omit body/preview).
 
 ## Implemented User Flows
 
@@ -81,6 +96,7 @@ Credentials are fetched by running `password_command`; there is no interactive p
 - Mark read/unread, flag/unflag, move to mailbox (`Email/set` variants).
 - Multi-account switching (`a`) from mailbox view.
 - Mouse support (click select/open, wheel scrolling) for list/help views.
+- CLI mode (`--cli`): all of the above operations available via JSON commands over stdin/stdout.
 
 ## Keybindings (implemented)
 
