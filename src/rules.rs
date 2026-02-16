@@ -354,70 +354,60 @@ pub fn apply_rules(
     );
 
     for email in emails {
-        log_debug!("[Rules] Evaluating email {}", email.id);
+        let mut matched_rule_names = Vec::new();
+        let mut queued_rule_summaries = Vec::new();
         for rule in rules {
             if rule.skip_if_to_me && is_email_to_me(email, my_email_regex) {
-                log_debug!(
-                    "[Rules] Email {} skipping rule '{}' because skip_if_to_me=true and To/Cc matches '{}'",
-                    email.id,
-                    rule.name,
-                    my_email_regex.as_str()
-                );
                 continue;
             }
             let matched = evaluate_condition(&rule.condition, email);
-            log_debug!(
-                "[Rules] Email {} rule '{}' matched={}",
-                email.id,
-                rule.name,
-                matched
-            );
 
             if matched {
+                matched_rule_names.push(rule.name.clone());
                 let filtered_actions = filter_noop_actions(&rule.actions, email, mailboxes);
 
                 if !filtered_actions.is_empty() {
                     total_actions += filtered_actions.len();
-                    log_info!(
-                        "[Rules] Email {} rule '{}' queued {} action(s): {}",
-                        email.id,
-                        rule.name,
-                        filtered_actions.len(),
-                        filtered_actions
-                            .iter()
-                            .map(format_action_name)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
+                    let action_names = filtered_actions
+                        .iter()
+                        .map(format_action_name)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    queued_rule_summaries.push(format!("{} -> {}", rule.name, action_names));
                     applications.push(RuleApplication {
                         email_id: email.id.clone(),
                         rule_name: rule.name.clone(),
                         actions: filtered_actions,
                     });
-                } else {
-                    log_debug!(
-                        "[Rules] Email {} rule '{}' matched but all actions were no-ops",
-                        email.id,
-                        rule.name
-                    );
                 }
 
                 if !rule.continue_processing {
-                    log_debug!(
-                        "[Rules] Email {} stopping at rule '{}' (continue_processing=false)",
-                        email.id,
-                        rule.name
-                    );
                     break;
-                } else {
-                    log_debug!(
-                        "[Rules] Email {} continuing after rule '{}' (continue_processing=true)",
-                        email.id,
-                        rule.name
-                    );
                 }
             }
         }
+
+        let subject = email.subject.as_deref().unwrap_or("(none)");
+        let to_line = format_addresses(&email.to).unwrap_or_else(|| "(none)".to_string());
+        let matched = if matched_rule_names.is_empty() {
+            "(none)".to_string()
+        } else {
+            matched_rule_names.join(", ")
+        };
+        let queued = if queued_rule_summaries.is_empty() {
+            "(none)".to_string()
+        } else {
+            queued_rule_summaries.join("; ")
+        };
+
+        log_info!(
+            "[Rules] Email {} subject='{}' to='{}' matched_rules=[{}] queued_actions=[{}]",
+            email.id,
+            subject,
+            to_line,
+            matched,
+            queued
+        );
     }
 
     log_info!(
