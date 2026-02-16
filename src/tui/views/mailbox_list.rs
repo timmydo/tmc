@@ -27,6 +27,9 @@ pub struct MailboxListView {
     retention_policies: Vec<RetentionPolicyConfig>,
     status_message: Option<String>,
     pending_retention_preview: Option<Vec<RetentionCandidate>>,
+    create_mode: bool,
+    create_input: String,
+    delete_confirm_mode: bool,
 }
 
 impl MailboxListView {
@@ -56,6 +59,9 @@ impl MailboxListView {
             retention_policies,
             status_message: None,
             pending_retention_preview: None,
+            create_mode: false,
+            create_input: String::new(),
+            delete_confirm_mode: false,
         }
     }
 
@@ -132,7 +138,28 @@ impl View for MailboxListView {
         let sep = "-".repeat(term.cols as usize);
         term.write_str(&sep)?;
 
-        if self.loading && self.mailboxes.is_empty() {
+        if self.create_mode {
+            term.move_to(3, 1)?;
+            term.set_bold()?;
+            term.write_truncated("Create new folder:", term.cols)?;
+            term.reset_attr()?;
+            term.move_to(4, 1)?;
+            let input = format!("Name: {}_", self.create_input);
+            term.write_truncated(&input, term.cols)?;
+        } else if self.delete_confirm_mode {
+            term.move_to(3, 1)?;
+            term.set_bold()?;
+            let name = self
+                .mailboxes
+                .get(self.cursor)
+                .map(|m| m.name.as_str())
+                .unwrap_or("(unknown)");
+            let prompt = format!("Delete folder '{}'? (y/N)", name);
+            term.write_truncated(&prompt, term.cols)?;
+            term.reset_attr()?;
+            term.move_to(4, 1)?;
+            term.write_truncated("Press y to confirm, n or Esc to cancel.", term.cols)?;
+        } else if self.loading && self.mailboxes.is_empty() {
             term.move_to(3, 1)?;
             term.write_truncated("Loading mailboxes...", term.cols)?;
         } else if let Some(ref err) = self.error {
@@ -184,19 +211,23 @@ impl View for MailboxListView {
         } else {
             ""
         };
-        let status = if self.loading {
+        let status = if self.create_mode {
+            " New folder name | Enter:create Esc:cancel".to_string()
+        } else if self.delete_confirm_mode {
+            " Confirm delete | y:delete n/Esc:cancel".to_string()
+        } else if self.loading {
             format!(
-                " Loading... | q:quit g:refresh c:compose x:preview-expire X:expire{}",
+                " Loading... | q:quit g:refresh c:compose +:new-folder d:delete-folder x:preview-expire X:expire{}",
                 account_hint
             )
         } else if self.mailboxes.is_empty() {
             format!(
-                " q:quit g:refresh c:compose x:preview-expire X:expire{}",
+                " q:quit g:refresh c:compose +:new-folder x:preview-expire X:expire{}",
                 account_hint
             )
         } else {
             format!(
-                " {}/{} | q:quit n/p:navigate RET:open g:refresh c:compose x:preview-expire X:expire ?:help{}",
+                " {}/{} | q:quit n/p:navigate RET:open g:refresh c:compose +:new-folder d:delete-folder x:preview-expire X:expire ?:help{}",
                 self.cursor + 1,
                 self.mailboxes.len(),
                 account_hint,
@@ -218,6 +249,63 @@ impl View for MailboxListView {
     }
 
     fn handle_key(&mut self, key: Key, term_rows: u16) -> ViewAction {
+        if self.create_mode {
+            match key {
+                Key::Enter => {
+                    let name = self.create_input.trim().to_string();
+                    if name.is_empty() {
+                        self.status_message = Some("Folder name cannot be empty".to_string());
+                    } else if let Err(e) = self
+                        .cmd_tx
+                        .send(BackendCommand::CreateMailbox { name: name.clone() })
+                    {
+                        self.status_message = Some(format!("Create folder failed to send: {}", e));
+                    } else {
+                        self.status_message = Some(format!("Creating folder '{}'", name));
+                        self.create_mode = false;
+                        self.create_input.clear();
+                    }
+                }
+                Key::Escape | Key::Char('q') => {
+                    self.create_mode = false;
+                    self.create_input.clear();
+                }
+                Key::Backspace => {
+                    self.create_input.pop();
+                }
+                Key::Char(c) => {
+                    self.create_input.push(c);
+                }
+                _ => {}
+            }
+            return ViewAction::Continue;
+        }
+
+        if self.delete_confirm_mode {
+            match key {
+                Key::Char('y') | Key::Char('Y') => {
+                    if let Some(mailbox) = self.mailboxes.get(self.cursor) {
+                        if let Err(e) = self.cmd_tx.send(BackendCommand::DeleteMailbox {
+                            id: mailbox.id.clone(),
+                            name: mailbox.name.clone(),
+                        }) {
+                            self.status_message =
+                                Some(format!("Delete folder failed to send: {}", e));
+                        } else {
+                            self.status_message =
+                                Some(format!("Deleting folder '{}'", mailbox.name));
+                        }
+                    }
+                    self.delete_confirm_mode = false;
+                }
+                Key::Escape | Key::Char('q') | Key::Char('n') | Key::Char('N') | Key::Enter => {
+                    self.delete_confirm_mode = false;
+                }
+                _ => {}
+            }
+            return ViewAction::Continue;
+        }
+
         let page = (term_rows as usize).saturating_sub(4);
         match key {
             Key::Char('q') => ViewAction::Quit,
@@ -279,6 +367,17 @@ impl View for MailboxListView {
             }
             Key::Char('g') => {
                 self.request_refresh();
+                ViewAction::Continue
+            }
+            Key::Char('+') => {
+                self.create_mode = true;
+                self.create_input.clear();
+                ViewAction::Continue
+            }
+            Key::Char('d') => {
+                if !self.mailboxes.is_empty() {
+                    self.delete_confirm_mode = true;
+                }
                 ViewAction::Continue
             }
             Key::Char('x') => {
@@ -406,6 +505,32 @@ impl View for MailboxListView {
                 }
                 true
             }
+            BackendResponse::MailboxCreated { name, result } => {
+                match result {
+                    Ok(()) => {
+                        self.status_message = Some(format!("Created folder '{}'", name));
+                        self.request_refresh();
+                    }
+                    Err(e) => {
+                        self.status_message =
+                            Some(format!("Create folder '{}' failed: {}", name, e));
+                    }
+                }
+                true
+            }
+            BackendResponse::MailboxDeleted { name, result } => {
+                match result {
+                    Ok(()) => {
+                        self.status_message = Some(format!("Deleted folder '{}'", name));
+                        self.request_refresh();
+                    }
+                    Err(e) => {
+                        self.status_message =
+                            Some(format!("Delete folder '{}' failed: {}", name, e));
+                    }
+                }
+                true
+            }
             BackendResponse::RetentionExecuted { result } => {
                 match result {
                     Ok(exec) => {
@@ -453,7 +578,7 @@ impl View for MailboxListView {
     }
 
     fn trigger_periodic_sync(&mut self) -> bool {
-        if self.loading {
+        if self.loading || self.create_mode || self.delete_confirm_mode {
             return false;
         }
         self.request_refresh();

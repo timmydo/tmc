@@ -262,6 +262,88 @@ impl JmapClient {
         Err(JmapError::Api("Unexpected response".to_string()))
     }
 
+    pub fn create_mailbox(&self, name: &str) -> Result<(), JmapError> {
+        log_info!("[JMAP] Mailbox/set creating mailbox: {}", name);
+
+        let request = JmapRequest {
+            using: vec!["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            method_calls: vec![MethodCall(
+                "Mailbox/set",
+                json!({
+                    "accountId": self.account_id,
+                    "create": {
+                        "newMailbox": {
+                            "name": name
+                        }
+                    }
+                }),
+                "0".to_string(),
+            )],
+        };
+
+        let response = self.call(request)?;
+
+        if let Some(method_response) = response.method_responses.first() {
+            if method_response.0 == "Mailbox/set" {
+                if let Some(not_created) = method_response.1.get("notCreated") {
+                    if not_created.get("newMailbox").is_some() {
+                        return Err(JmapError::Api(format!(
+                            "Failed to create mailbox: {:?}",
+                            not_created
+                        )));
+                    }
+                }
+                if method_response
+                    .1
+                    .get("created")
+                    .and_then(|created| created.get("newMailbox"))
+                    .is_some()
+                {
+                    return Ok(());
+                }
+                return Err(JmapError::Api(
+                    "Mailbox creation did not return a created mailbox".to_string(),
+                ));
+            }
+        }
+
+        Err(JmapError::Api("Unexpected response".to_string()))
+    }
+
+    pub fn delete_mailbox(&self, id: &str) -> Result<(), JmapError> {
+        log_info!("[JMAP] Mailbox/set deleting mailbox: {}", id);
+
+        let request = JmapRequest {
+            using: vec!["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            method_calls: vec![MethodCall(
+                "Mailbox/set",
+                json!({
+                    "accountId": self.account_id,
+                    "destroy": [id]
+                }),
+                "0".to_string(),
+            )],
+        };
+
+        let response = self.call(request)?;
+
+        if let Some(method_response) = response.method_responses.first() {
+            if method_response.0 == "Mailbox/set" {
+                if let Some(not_destroyed) = method_response.1.get("notDestroyed") {
+                    if not_destroyed.get(id).is_some() {
+                        return Err(JmapError::Api(format!(
+                            "Failed to delete mailbox: {:?}",
+                            not_destroyed
+                        )));
+                    }
+                }
+                return Ok(());
+            }
+        }
+
+        Err(JmapError::Api("Unexpected response".to_string()))
+    }
+
     pub fn query_emails(
         &self,
         mailbox_id: &str,

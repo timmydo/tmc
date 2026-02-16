@@ -10,6 +10,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Commands sent from the UI thread to the backend thread.
 pub enum BackendCommand {
     FetchMailboxes,
+    CreateMailbox {
+        name: String,
+    },
+    DeleteMailbox {
+        id: String,
+        name: String,
+    },
     QueryEmails {
         mailbox_id: String,
         page_size: u32,
@@ -72,6 +79,14 @@ pub enum BackendCommand {
 /// Responses sent from the backend thread to the UI thread.
 pub enum BackendResponse {
     Mailboxes(Result<Vec<Mailbox>, String>),
+    MailboxCreated {
+        name: String,
+        result: Result<(), String>,
+    },
+    MailboxDeleted {
+        name: String,
+        result: Result<(), String>,
+    },
     Emails {
         mailbox_id: String,
         emails: Result<Vec<Email>, String>,
@@ -185,6 +200,24 @@ fn backend_loop(
                     cached_mailboxes = mailboxes.clone();
                 }
                 let _ = resp_tx.send(BackendResponse::Mailboxes(result));
+            }
+            BackendCommand::CreateMailbox { name } => {
+                let result = client.create_mailbox(&name).map_err(|e| e.to_string());
+                if result.is_ok() {
+                    if let Ok(mailboxes) = client.get_mailboxes() {
+                        cached_mailboxes = mailboxes;
+                    }
+                }
+                let _ = resp_tx.send(BackendResponse::MailboxCreated { name, result });
+            }
+            BackendCommand::DeleteMailbox { id, name } => {
+                let result = client.delete_mailbox(&id).map_err(|e| e.to_string());
+                if result.is_ok() {
+                    if let Ok(mailboxes) = client.get_mailboxes() {
+                        cached_mailboxes = mailboxes;
+                    }
+                }
+                let _ = resp_tx.send(BackendResponse::MailboxDeleted { name, result });
             }
             BackendCommand::QueryEmails {
                 mailbox_id,
