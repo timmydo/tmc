@@ -89,13 +89,11 @@ pub enum BackendCommand {
         origin: String,
         mailbox_id: String,
         mailbox_name: String,
-        loaded_email_ids: Vec<String>,
     },
     RunRulesForMailbox {
         origin: String,
         mailbox_id: String,
         mailbox_name: String,
-        loaded_email_ids: Vec<String>,
     },
     Shutdown,
 }
@@ -623,14 +621,12 @@ fn backend_loop(
                 origin,
                 mailbox_id,
                 mailbox_name,
-                loaded_email_ids,
             } => {
                 log_info!(
-                    "[Backend] cmd#{} PreviewRulesForMailbox origin='{}' mailbox='{}' loaded_email_ids={}",
+                    "[Backend] cmd#{} PreviewRulesForMailbox origin='{}' mailbox='{}' (full mailbox scan)",
                     command_seq,
                     origin,
-                    mailbox_name,
-                    loaded_email_ids.len()
+                    mailbox_name
                 );
                 let result = preview_rules_for_mailbox(
                     &client,
@@ -638,7 +634,7 @@ fn backend_loop(
                     &rules,
                     &custom_headers,
                     &my_email_regex,
-                    &loaded_email_ids,
+                    &mailbox_id,
                 );
                 let _ = resp_tx.send(BackendResponse::RulesDryRun {
                     mailbox_id,
@@ -650,14 +646,12 @@ fn backend_loop(
                 origin,
                 mailbox_id,
                 mailbox_name,
-                loaded_email_ids,
             } => {
                 log_info!(
-                    "[Backend] cmd#{} RunRulesForMailbox origin='{}' mailbox='{}' loaded_email_ids={}",
+                    "[Backend] cmd#{} RunRulesForMailbox origin='{}' mailbox='{}' (full mailbox scan)",
                     command_seq,
                     origin,
-                    mailbox_name,
-                    loaded_email_ids.len()
+                    mailbox_name
                 );
                 let result = run_rules_for_mailbox(
                     &client,
@@ -665,7 +659,7 @@ fn backend_loop(
                     &rules,
                     &custom_headers,
                     &my_email_regex,
-                    &loaded_email_ids,
+                    &mailbox_id,
                 );
                 let _ = resp_tx.send(BackendResponse::RulesRun {
                     mailbox_id,
@@ -704,15 +698,34 @@ fn fetch_emails_chunked(
     Ok(out)
 }
 
+fn fetch_rule_emails_chunked(
+    client: &JmapClient,
+    ids: &[String],
+    custom_headers: &[String],
+) -> Result<Vec<Email>, String> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(EMAIL_GET_CHUNK_SIZE) {
+        let mut batch = client
+            .get_emails_for_rules(chunk, custom_headers)
+            .map_err(|e| e.to_string())?;
+        out.append(&mut batch);
+    }
+    Ok(out)
+}
+
 fn run_rules_for_mailbox(
     client: &JmapClient,
     mailboxes: &[Mailbox],
     rules: &[CompiledRule],
     custom_headers: &[String],
     my_email_regex: &Regex,
-    loaded_email_ids: &[String],
+    mailbox_id: &str,
 ) -> Result<RulesRunResult, String> {
-    if rules.is_empty() || loaded_email_ids.is_empty() {
+    if rules.is_empty() {
         return Ok(RulesRunResult {
             scanned: 0,
             matched_rules: 0,
@@ -720,7 +733,16 @@ fn run_rules_for_mailbox(
         });
     }
 
-    let emails = fetch_emails_chunked(client, loaded_email_ids, custom_headers)?;
+    let ids = fetch_all_mailbox_email_ids(client, mailbox_id)?;
+    if ids.is_empty() {
+        return Ok(RulesRunResult {
+            scanned: 0,
+            matched_rules: 0,
+            actions: 0,
+        });
+    }
+
+    let emails = fetch_rule_emails_chunked(client, &ids, custom_headers)?;
     let scanned = emails.len();
     let applications = rules::apply_rules(rules, &emails, mailboxes, my_email_regex);
     let matched_rules = applications.len();
@@ -742,9 +764,9 @@ fn preview_rules_for_mailbox(
     rules: &[CompiledRule],
     custom_headers: &[String],
     my_email_regex: &Regex,
-    loaded_email_ids: &[String],
+    mailbox_id: &str,
 ) -> Result<RulesDryRunResult, String> {
-    if rules.is_empty() || loaded_email_ids.is_empty() {
+    if rules.is_empty() {
         return Ok(RulesDryRunResult {
             scanned: 0,
             matched_rules: 0,
@@ -753,7 +775,17 @@ fn preview_rules_for_mailbox(
         });
     }
 
-    let emails = fetch_emails_chunked(client, loaded_email_ids, custom_headers)?;
+    let ids = fetch_all_mailbox_email_ids(client, mailbox_id)?;
+    if ids.is_empty() {
+        return Ok(RulesDryRunResult {
+            scanned: 0,
+            matched_rules: 0,
+            actions: 0,
+            entries: Vec::new(),
+        });
+    }
+
+    let emails = fetch_rule_emails_chunked(client, &ids, custom_headers)?;
     let scanned = emails.len();
     let mut entries = Vec::new();
     let email_by_id: HashMap<String, &Email> = emails.iter().map(|e| (e.id.clone(), e)).collect();
@@ -795,6 +827,45 @@ fn preview_rules_for_mailbox(
         actions,
         entries,
     })
+}
+
+const MAILBOX_QUERY_CHUNK_SIZE: u32 = 500;
+
+fn fetch_all_mailbox_email_ids(
+    client: &JmapClient,
+    mailbox_id: &str,
+) -> Result<Vec<String>, String> {
+    let mut seen_ids = HashSet::new();
+    let mut ids = Vec::new();
+    let mut position = 0u32;
+
+    loop {
+        let query = client
+            .query_emails_uncollapsed(mailbox_id, MAILBOX_QUERY_CHUNK_SIZE, position)
+            .map_err(|e| e.to_string())?;
+        if query.ids.is_empty() {
+            break;
+        }
+
+        let loaded = query.ids.len() as u32;
+        for id in query.ids {
+            if seen_ids.insert(id.clone()) {
+                ids.push(id);
+            }
+        }
+
+        position = query.position.saturating_add(loaded);
+        if loaded == 0 {
+            break;
+        }
+        if let Some(total) = query.total {
+            if position >= total {
+                break;
+            }
+        }
+    }
+
+    Ok(ids)
 }
 
 fn format_rule_action(action: &rules::Action) -> String {

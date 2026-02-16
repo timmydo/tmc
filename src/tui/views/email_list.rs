@@ -865,12 +865,10 @@ impl View for EmailListView {
             Key::Char('e') => {
                 let mailbox_id = self.mailbox_id.clone();
                 let mailbox_name = self.mailbox_name.clone();
-                let loaded_email_ids = self.emails.iter().map(|e| e.id.clone()).collect();
                 if let Err(e) = self.cmd_tx.send(BackendCommand::PreviewRulesForMailbox {
                     origin: "email_list.key_e_dry_run".to_string(),
                     mailbox_id,
                     mailbox_name: mailbox_name.clone(),
-                    loaded_email_ids,
                 }) {
                     self.status_message = Some(format!("Rules dry-run failed to send: {}", e));
                 } else {
@@ -882,12 +880,10 @@ impl View for EmailListView {
             Key::Char('E') => {
                 let mailbox_id = self.mailbox_id.clone();
                 let mailbox_name = self.mailbox_name.clone();
-                let loaded_email_ids = self.emails.iter().map(|e| e.id.clone()).collect();
                 if let Err(e) = self.cmd_tx.send(BackendCommand::RunRulesForMailbox {
                     origin: "email_list.key_E_run_rules".to_string(),
                     mailbox_id,
                     mailbox_name: mailbox_name.clone(),
-                    loaded_email_ids,
                 }) {
                     self.status_message = Some(format!("Run rules failed to send: {}", e));
                 } else {
