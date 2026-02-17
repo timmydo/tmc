@@ -643,11 +643,19 @@ fn backend_loop(
                         .download_blob(&blob_id, &name, &content_type)
                         .map_err(|e| e.to_string())?;
 
-                    let dir = std::env::temp_dir().join("tmc-attachments");
+                    let dir = std::env::var("XDG_DOWNLOAD_DIR")
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|_| {
+                            std::env::var("HOME")
+                                .map(std::path::PathBuf::from)
+                                .unwrap_or_else(|_| std::env::temp_dir())
+                                .join("Downloads")
+                        });
                     std::fs::create_dir_all(&dir)
-                        .map_err(|e| format!("Failed to create temp dir: {}", e))?;
+                        .map_err(|e| format!("Failed to create download dir: {}", e))?;
 
-                    let path = dir.join(&name);
+                    let safe_name = name.replace('/', "_").replace('\\', "_").replace('\0', "_");
+                    let path = dir.join(&safe_name);
                     std::fs::write(&path, &bytes)
                         .map_err(|e| format!("Failed to write file: {}", e))?;
 
