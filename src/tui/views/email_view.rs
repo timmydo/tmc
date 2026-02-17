@@ -174,6 +174,7 @@ pub struct EmailView {
     deleted_folder: String,
     move_mode: bool,
     move_cursor: usize,
+    prefer_html: bool,
 }
 
 impl EmailView {
@@ -216,6 +217,7 @@ impl EmailView {
             deleted_folder,
             move_mode: false,
             move_cursor: 0,
+            prefer_html: false,
         }
     }
 
@@ -262,6 +264,7 @@ impl EmailView {
             deleted_folder,
             move_mode: false,
             move_cursor: 0,
+            prefer_html: false,
         }
     }
 
@@ -306,7 +309,11 @@ impl EmailView {
         }
     }
 
-    fn render_email(email: &Email, raw_headers: Option<&str>) -> (Vec<String>, Vec<LineKind>) {
+    fn render_email(
+        email: &Email,
+        raw_headers: Option<&str>,
+        prefer_html: bool,
+    ) -> (Vec<String>, Vec<LineKind>) {
         let mut lines = Vec::new();
         let mut kinds = Vec::new();
 
@@ -336,7 +343,7 @@ impl EmailView {
         kinds.push(LineKind::Body);
 
         // Body
-        let body_text = Self::extract_body(email);
+        let body_text = Self::extract_body(email, prefer_html);
         for line in body_text.lines() {
             lines.push(line.to_string());
             kinds.push(LineKind::Body);
@@ -348,6 +355,7 @@ impl EmailView {
     fn render_thread_emails(
         emails: &[Email],
         raw_headers_cache: &HashMap<String, String>,
+        prefer_html: bool,
     ) -> (Vec<String>, Vec<LineKind>) {
         let mut lines = Vec::new();
         let mut kinds = Vec::new();
@@ -364,7 +372,7 @@ impl EmailView {
             Self::render_headers(email, raw, &mut lines, &mut kinds);
             lines.push(String::new());
             kinds.push(LineKind::Body);
-            let body_text = Self::extract_body(email);
+            let body_text = Self::extract_body(email, prefer_html);
             for line in body_text.lines() {
                 lines.push(line.to_string());
                 kinds.push(LineKind::Body);
@@ -373,17 +381,19 @@ impl EmailView {
         (lines, kinds)
     }
 
-    fn extract_body(email: &Email) -> String {
-        // Try htmlBody first if available — it's the canonical rich version
-        // and html2text handles rendering it to terminal text reliably.
-        if let Some(ref html_body) = email.html_body {
-            for part in html_body {
-                if let Some(value) = email.body_values.get(&part.part_id) {
-                    return html_to_terminal(&value.value);
+    fn extract_body(email: &Email, prefer_html: bool) -> String {
+        if prefer_html {
+            // When user explicitly requests HTML rendering
+            if let Some(ref html_body) = email.html_body {
+                for part in html_body {
+                    if let Some(value) = email.body_values.get(&part.part_id) {
+                        return html_to_terminal(&value.value);
+                    }
                 }
             }
         }
-        // Fall back to textBody (plain text)
+        // Prefer textBody (plain text) — it preserves the author's formatting
+        // and avoids lossy HTML-to-text conversion.
         if let Some(ref text_body) = email.text_body {
             for part in text_body {
                 if let Some(value) = email.body_values.get(&part.part_id) {
@@ -397,6 +407,14 @@ impl EmailView {
                         return html_to_terminal(&value.value);
                     }
                     return value.value.clone();
+                }
+            }
+        }
+        // Fall back to htmlBody when no plain text is available
+        if let Some(ref html_body) = email.html_body {
+            for part in html_body {
+                if let Some(value) = email.body_values.get(&part.part_id) {
+                    return html_to_terminal(&value.value);
                 }
             }
         }
@@ -483,7 +501,8 @@ impl EmailView {
                 // Empty map = use structured headers
                 &HashMap::new()
             };
-            let (lines, kinds) = Self::render_thread_emails(&self.thread_emails, cache);
+            let (lines, kinds) =
+                Self::render_thread_emails(&self.thread_emails, cache, self.prefer_html);
             self.lines = lines;
             self.line_kinds = kinds;
         } else if let Some(ref email) = self.email {
@@ -492,7 +511,7 @@ impl EmailView {
             } else {
                 None
             };
-            let (lines, kinds) = Self::render_email(email, raw);
+            let (lines, kinds) = Self::render_email(email, raw, self.prefer_html);
             self.lines = lines;
             self.line_kinds = kinds;
         }
@@ -987,6 +1006,16 @@ impl View for EmailView {
                 }
                 ViewAction::Continue
             }
+            Key::Char('h') => {
+                self.prefer_html = !self.prefer_html;
+                self.status_message = Some(if self.prefer_html {
+                    "Showing HTML body".to_string()
+                } else {
+                    "Showing plain text body".to_string()
+                });
+                self.rerender_lines();
+                ViewAction::Continue
+            }
             Key::Char('?') => ViewAction::Push(Box::new(HelpView::new())),
             Key::ScrollUp => {
                 if self.scroll > 0 {
@@ -1023,7 +1052,11 @@ impl View for EmailView {
                         } else {
                             &empty
                         };
-                        let (lines, kinds) = Self::render_thread_emails(&self.thread_emails, cache);
+                        let (lines, kinds) = Self::render_thread_emails(
+                            &self.thread_emails,
+                            cache,
+                            self.prefer_html,
+                        );
                         self.lines = lines;
                         self.line_kinds = kinds;
                         self.error = None;
@@ -1059,7 +1092,7 @@ impl View for EmailView {
                         } else {
                             None
                         };
-                        let (lines, kinds) = Self::render_email(email, raw);
+                        let (lines, kinds) = Self::render_email(email, raw, self.prefer_html);
                         self.lines = lines;
                         self.line_kinds = kinds;
                         self.email = Some(email.clone());

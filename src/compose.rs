@@ -212,15 +212,7 @@ fn extract_email_addr(from_header: &str) -> Option<String> {
 }
 
 pub(crate) fn extract_body_text(email: &crate::jmap::types::Email) -> String {
-    // Prefer htmlBody when available — html2text converts it to clean plain text,
-    // avoiding garbled output from bad text/plain alternatives in marketing emails.
-    if let Some(ref html_body) = email.html_body {
-        for part in html_body {
-            if let Some(value) = email.body_values.get(&part.part_id) {
-                return html_to_plain(&value.value);
-            }
-        }
-    }
+    // Prefer textBody (plain text) — it preserves the author's formatting.
     if let Some(ref text_body) = email.text_body {
         for part in text_body {
             if let Some(value) = email.body_values.get(&part.part_id) {
@@ -234,6 +226,14 @@ pub(crate) fn extract_body_text(email: &crate::jmap::types::Email) -> String {
                     return html_to_plain(&value.value);
                 }
                 return value.value.clone();
+            }
+        }
+    }
+    // Fall back to htmlBody when no plain text is available
+    if let Some(ref html_body) = email.html_body {
+        for part in html_body {
+            if let Some(value) = email.body_values.get(&part.part_id) {
+                return html_to_plain(&value.value);
             }
         }
     }

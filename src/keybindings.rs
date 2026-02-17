@@ -401,6 +401,12 @@ pub fn all_keybindings() -> Vec<KeyBinding> {
         },
         KeyBinding {
             view: "email_view",
+            key: "h",
+            action: "toggle_html",
+            description: "Toggle HTML vs plain text body",
+        },
+        KeyBinding {
+            view: "email_view",
             key: "v",
             action: "raw_headers",
             description: "Toggle raw headers (DKIM, Received, etc)",
