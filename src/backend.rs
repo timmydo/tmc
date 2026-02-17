@@ -410,7 +410,7 @@ fn backend_loop(
                     let total = query.total;
                     let position = query.position;
                     let loaded = query.ids.len() as u32;
-                    let emails = if query.ids.is_empty() {
+                    let mut emails = if query.ids.is_empty() {
                         Ok(Vec::new())
                     } else {
                         fetch_emails_chunked(&client, &query.ids, &custom_headers)
@@ -474,11 +474,18 @@ fn backend_loop(
                                         mailbox_name,
                                         origin
                                     );
-                                    rules::execute_rule_actions(
+                                    let removed_ids = rules::execute_rule_actions(
                                         &applications,
                                         &cached_mailboxes,
                                         &client,
                                     );
+                                    if !removed_ids.is_empty() {
+                                        log_info!(
+                                            "[Rules] Filtering {} moved/deleted email(s) from response",
+                                            removed_ids.len()
+                                        );
+                                        emails.retain(|e| !removed_ids.contains(&e.id));
+                                    }
                                 }
                             }
 
@@ -938,7 +945,7 @@ fn run_rules_for_mailbox(
     let matched_rules = applications.len();
     let actions = applications.iter().map(|a| a.actions.len()).sum::<usize>();
     if !applications.is_empty() {
-        rules::execute_rule_actions(&applications, mailboxes, client);
+        let _ = rules::execute_rule_actions(&applications, mailboxes, client);
     }
 
     // Mark all scanned emails as processed (explicit run bypasses processed check

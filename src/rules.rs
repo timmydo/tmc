@@ -2,7 +2,7 @@ use crate::jmap::client::JmapClient;
 use crate::jmap::types::{Email, EmailAddress, Mailbox};
 use regex::Regex;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 // --- TOML deserialization types ---
@@ -583,11 +583,13 @@ pub fn resolve_mailbox_id(name: &str, mailboxes: &[Mailbox]) -> Option<String> {
 }
 
 /// Execute rule applications against the JMAP server.
+/// Returns the set of email IDs that were moved or deleted (removed from current mailbox).
 pub fn execute_rule_actions(
     applications: &[RuleApplication],
     mailboxes: &[Mailbox],
     client: &JmapClient,
-) {
+) -> HashSet<String> {
+    let mut removed_ids = HashSet::new();
     let action_count = applications.iter().map(|a| a.actions.len()).sum::<usize>();
     log_info!(
         "[Rules] Executing {} action(s) from {} application(s)",
@@ -652,6 +654,9 @@ pub fn execute_rule_actions(
                         app.email_id,
                         app.rule_name
                     );
+                    if matches!(action, Action::Move { .. } | Action::Delete) {
+                        removed_ids.insert(app.email_id.clone());
+                    }
                 }
                 Err(e) => {
                     log_warn!(
@@ -665,6 +670,7 @@ pub fn execute_rule_actions(
             }
         }
     }
+    removed_ids
 }
 
 fn format_action_name(action: &Action) -> String {
