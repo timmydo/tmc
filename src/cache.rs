@@ -1,5 +1,5 @@
 use crate::jmap::types::Email;
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, TableDefinition};
 use std::path::PathBuf;
 
 const EMAILS: TableDefinition<&str, &[u8]> = TableDefinition::new("emails");
@@ -84,16 +84,6 @@ impl Cache {
         }
     }
 
-    pub fn is_rules_processed(&self, id: &str) -> bool {
-        let Ok(txn) = self.db.begin_read() else {
-            return false;
-        };
-        let Ok(table) = txn.open_table(RULES_PROCESSED) else {
-            return false;
-        };
-        matches!(table.get(id), Ok(Some(_)))
-    }
-
     pub fn filter_unprocessed(&self, ids: &[String]) -> Vec<String> {
         let Ok(txn) = self.db.begin_read() else {
             return ids.to_vec();
@@ -136,13 +126,47 @@ impl Cache {
         }
     }
 
-    pub fn clear(&self) {
+    pub fn clear_all_accounts() {
+        let dir = cache_dir();
+        if !dir.exists() {
+            return;
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("redb") {
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        eprintln!(
+                            "Warning: failed to remove cache file {}: {}",
+                            path.display(),
+                            e
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+use redb::ReadableTable;
+
+#[cfg(test)]
+impl Cache {
+    fn is_rules_processed(&self, id: &str) -> bool {
+        let Ok(txn) = self.db.begin_read() else {
+            return false;
+        };
+        let Ok(table) = txn.open_table(RULES_PROCESSED) else {
+            return false;
+        };
+        matches!(table.get(id), Ok(Some(_)))
+    }
+
+    fn clear(&self) {
         let txn = match self.db.begin_write() {
             Ok(t) => t,
-            Err(e) => {
-                log_warn!("[Cache] failed to begin write txn for clear: {}", e);
-                return;
-            }
+            Err(_) => return,
         };
         {
             if let Ok(mut table) = txn.open_table(EMAILS) {
@@ -172,39 +196,7 @@ impl Cache {
                 }
             }
         }
-        if let Err(e) = txn.commit() {
-            log_warn!("[Cache] failed to commit clear: {}", e);
-        }
-    }
-
-    pub fn destroy(account_name: &str) {
-        let path = db_path(account_name);
-        if path.exists() {
-            if let Err(e) = std::fs::remove_file(&path) {
-                log_warn!("[Cache] failed to remove {}: {}", path.display(), e);
-            }
-        }
-    }
-
-    pub fn clear_all_accounts() {
-        let dir = cache_dir();
-        if !dir.exists() {
-            return;
-        }
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("redb") {
-                    if let Err(e) = std::fs::remove_file(&path) {
-                        eprintln!(
-                            "Warning: failed to remove cache file {}: {}",
-                            path.display(),
-                            e
-                        );
-                    }
-                }
-            }
-        }
+        let _ = txn.commit();
     }
 }
 
