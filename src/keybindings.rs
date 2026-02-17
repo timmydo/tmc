@@ -147,6 +147,12 @@ pub fn all_keybindings() -> Vec<KeyBinding> {
         },
         KeyBinding {
             view: "email_list",
+            key: "r",
+            action: "reply",
+            description: "Reply to selected email",
+        },
+        KeyBinding {
+            view: "email_list",
             key: "R",
             action: "reply_all",
             description: "Reply all to selected email",

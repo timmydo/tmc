@@ -21,14 +21,18 @@ pub fn build_reply_draft(email: &crate::jmap::types::Email, reply_all: bool, fro
 
     // Determine Cc: for reply-all
     let cc = if reply_all {
-        let from_lower = from.to_lowercase();
+        let from_email_lower = extract_email_addr(from).map(|s| s.to_lowercase());
         let mut cc_addrs = Vec::new();
 
         // Add original To recipients (minus self)
         if let Some(ref orig_to) = email.to {
             for addr in orig_to {
                 if let Some(ref email_addr) = addr.email {
-                    if email_addr.to_lowercase() != from_lower {
+                    if from_email_lower
+                        .as_ref()
+                        .map(|me| email_addr.to_lowercase() != *me)
+                        .unwrap_or(true)
+                    {
                         cc_addrs.push(addr.to_string());
                     }
                 }
@@ -39,7 +43,11 @@ pub fn build_reply_draft(email: &crate::jmap::types::Email, reply_all: bool, fro
         if let Some(ref orig_cc) = email.cc {
             for addr in orig_cc {
                 if let Some(ref email_addr) = addr.email {
-                    if email_addr.to_lowercase() != from_lower {
+                    if from_email_lower
+                        .as_ref()
+                        .map(|me| email_addr.to_lowercase() != *me)
+                        .unwrap_or(true)
+                    {
                         cc_addrs.push(addr.to_string());
                     }
                 }
@@ -186,6 +194,23 @@ fn format_address_list(addrs: &[crate::jmap::types::EmailAddress]) -> String {
         .join(", ")
 }
 
+fn extract_email_addr(from_header: &str) -> Option<String> {
+    if let (Some(start), Some(end)) = (from_header.find('<'), from_header.rfind('>')) {
+        if end > start + 1 {
+            let addr = from_header[start + 1..end].trim();
+            if !addr.is_empty() {
+                return Some(addr.to_string());
+            }
+        }
+    }
+    let trimmed = from_header.trim();
+    if trimmed.contains('@') {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
 pub(crate) fn extract_body_text(email: &crate::jmap::types::Email) -> String {
     // Prefer htmlBody when available — html2text converts it to clean plain text,
     // avoiding garbled output from bad text/plain alternatives in marketing emails.
@@ -309,6 +334,50 @@ mod tests {
         // Reply-all should include original To minus self
         let draft_all = build_reply_draft(&email, true, "me@example.com");
         assert!(!draft_all.contains("Cc:")); // self was the only To recipient
+    }
+
+    #[test]
+    fn test_build_reply_draft_reply_all_skips_self_for_named_from_header() {
+        use crate::jmap::types::{Email, EmailAddress};
+        use std::collections::HashMap;
+
+        let email = Email {
+            id: "test-id".to_string(),
+            thread_id: None,
+            from: Some(vec![EmailAddress {
+                name: Some("Sender".to_string()),
+                email: Some("sender@example.com".to_string()),
+            }]),
+            to: Some(vec![
+                EmailAddress {
+                    name: Some("Example User".to_string()),
+                    email: Some("user@example.com".to_string()),
+                },
+                EmailAddress {
+                    name: Some("Other".to_string()),
+                    email: Some("other@example.com".to_string()),
+                },
+            ]),
+            cc: None,
+            reply_to: None,
+            subject: Some("Hello".to_string()),
+            received_at: Some("2024-01-01T00:00:00Z".to_string()),
+            sent_at: Some("2024-01-01T00:00:00Z".to_string()),
+            preview: Some("Preview text".to_string()),
+            text_body: None,
+            html_body: None,
+            body_values: HashMap::new(),
+            keywords: HashMap::new(),
+            mailbox_ids: HashMap::new(),
+            message_id: Some(vec!["abc@example.com".to_string()]),
+            references: None,
+            attachments: None,
+            extra: HashMap::new(),
+        };
+
+        let draft = build_reply_draft(&email, true, "Example User <user@example.com>");
+        assert!(!draft.contains("Cc: Example User <user@example.com>"));
+        assert!(draft.contains("Cc: Other <other@example.com>"));
     }
 
     #[test]

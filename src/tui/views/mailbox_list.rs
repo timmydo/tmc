@@ -14,6 +14,7 @@ use std::sync::mpsc;
 pub struct MailboxListView {
     cmd_tx: mpsc::Sender<BackendCommand>,
     from_address: String,
+    reply_from_address: Option<String>,
     page_size: u32,
     mailboxes: Vec<Mailbox>,
     cursor: usize,
@@ -36,6 +37,7 @@ impl MailboxListView {
     pub fn new(
         cmd_tx: mpsc::Sender<BackendCommand>,
         from_address: String,
+        reply_from_address: Option<String>,
         page_size: u32,
         account_names: Vec<String>,
         current_account: String,
@@ -46,6 +48,7 @@ impl MailboxListView {
         MailboxListView {
             cmd_tx,
             from_address,
+            reply_from_address,
             page_size,
             mailboxes: Vec::new(),
             cursor: 0,
@@ -348,6 +351,9 @@ impl View for MailboxListView {
                     let view = EmailListView::new(
                         self.cmd_tx.clone(),
                         self.from_address.clone(),
+                        self.reply_from_address
+                            .clone()
+                            .unwrap_or_else(|| self.from_address.clone()),
                         mailbox.id.clone(),
                         mailbox.name.clone(),
                         self.page_size,
@@ -469,6 +475,9 @@ impl View for MailboxListView {
                 let view = EmailListView::new(
                     self.cmd_tx.clone(),
                     self.from_address.clone(),
+                    self.reply_from_address
+                        .clone()
+                        .unwrap_or_else(|| self.from_address.clone()),
                     mailbox.id.clone(),
                     mailbox.name.clone(),
                     self.page_size,

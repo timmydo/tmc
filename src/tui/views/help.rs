@@ -45,6 +45,7 @@ impl HelpView {
             "  Enter       Open email / thread reading view".to_string(),
             "  Alt-Enter   Open thread list view".to_string(),
             "  g           Refresh".to_string(),
+            "  r           Reply to selected email".to_string(),
             "  R           Reply all to selected email".to_string(),
             "  e           Dry-run rules on loaded messages".to_string(),
             "  E           Run rules on loaded messages".to_string(),

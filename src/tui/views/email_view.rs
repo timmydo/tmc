@@ -148,6 +148,7 @@ enum PendingWriteOp {
 pub struct EmailView {
     cmd_tx: mpsc::Sender<BackendCommand>,
     from_address: String,
+    reply_from_address: String,
     can_expire_now: bool,
     email_id: String,
     email: Option<Email>,
@@ -179,6 +180,7 @@ impl EmailView {
     pub fn new(
         cmd_tx: mpsc::Sender<BackendCommand>,
         from_address: String,
+        reply_from_address: String,
         email_id: String,
         can_expire_now: bool,
         mailboxes: Vec<Mailbox>,
@@ -188,6 +190,7 @@ impl EmailView {
         EmailView {
             cmd_tx,
             from_address,
+            reply_from_address,
             can_expire_now,
             email_id,
             email: None,
@@ -219,6 +222,7 @@ impl EmailView {
     pub fn new_thread(
         cmd_tx: mpsc::Sender<BackendCommand>,
         from_address: String,
+        reply_from_address: String,
         thread_id: String,
         _subject: String,
         can_expire_now: bool,
@@ -232,6 +236,7 @@ impl EmailView {
         EmailView {
             cmd_tx,
             from_address,
+            reply_from_address,
             can_expire_now,
             email_id: String::new(),
             email: None,
@@ -1078,8 +1083,11 @@ impl View for EmailView {
                             let draft = compose::build_forward_draft(email, &self.from_address);
                             self.pending_compose = Some(draft);
                         } else if let Some(reply_all) = reply_all {
-                            let draft =
-                                compose::build_reply_draft(email, reply_all, &self.from_address);
+                            let draft = compose::build_reply_draft(
+                                email,
+                                reply_all,
+                                &self.reply_from_address,
+                            );
                             self.pending_compose = Some(draft);
                         }
                     }

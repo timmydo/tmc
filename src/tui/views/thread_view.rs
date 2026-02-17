@@ -29,6 +29,7 @@ enum PendingWriteOp {
 pub struct ThreadView {
     cmd_tx: mpsc::Sender<BackendCommand>,
     from_address: String,
+    reply_from_address: String,
     thread_id: String,
     subject: String,
     emails: Vec<Email>,
@@ -50,6 +51,7 @@ impl ThreadView {
     pub fn new(
         cmd_tx: mpsc::Sender<BackendCommand>,
         from_address: String,
+        reply_from_address: String,
         thread_id: String,
         subject: String,
         mailboxes: Vec<Mailbox>,
@@ -63,6 +65,7 @@ impl ThreadView {
         ThreadView {
             cmd_tx,
             from_address,
+            reply_from_address,
             thread_id,
             subject,
             emails: Vec::new(),
@@ -180,6 +183,7 @@ impl ThreadView {
         let view = EmailView::new(
             self.cmd_tx.clone(),
             self.from_address.clone(),
+            self.reply_from_address.clone(),
             email_id.clone(),
             self.can_expire_now,
             self.mailboxes.clone(),

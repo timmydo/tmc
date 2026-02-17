@@ -332,7 +332,11 @@ fn test_download_attachment() {
 
     let path_str = resp["path"].as_str().expect("path string");
     let path = Path::new(path_str);
-    assert!(path.exists(), "downloaded file should exist at {}", path_str);
+    assert!(
+        path.exists(),
+        "downloaded file should exist at {}",
+        path_str
+    );
 
     let contents = std::fs::read_to_string(path).expect("read downloaded file");
     assert!(

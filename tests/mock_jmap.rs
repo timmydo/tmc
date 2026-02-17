@@ -379,24 +379,23 @@ impl MockJmapServer {
         let method = parts[0];
         let path = parts[1];
 
-        let (status, response_body, content_type) = if method == "GET"
-            && path.contains("/.well-known/jmap")
-        {
-            let (s, b) = Self::handle_session(port);
-            (s, b, "application/json")
-        } else if method == "POST" && path.contains("/api") {
-            let (s, b) = Self::handle_api(&body, state);
-            (s, b, "application/json")
-        } else if method == "GET" && path.starts_with("/download/") {
-            let (s, b) = Self::handle_download(path);
-            (s, b, "application/octet-stream")
-        } else {
-            (
-                "404 Not Found".to_string(),
-                json!({"error": "not found"}).to_string(),
-                "application/json",
-            )
-        };
+        let (status, response_body, content_type) =
+            if method == "GET" && path.contains("/.well-known/jmap") {
+                let (s, b) = Self::handle_session(port);
+                (s, b, "application/json")
+            } else if method == "POST" && path.contains("/api") {
+                let (s, b) = Self::handle_api(&body, state);
+                (s, b, "application/json")
+            } else if method == "GET" && path.starts_with("/download/") {
+                let (s, b) = Self::handle_download(path);
+                (s, b, "application/octet-stream")
+            } else {
+                (
+                    "404 Not Found".to_string(),
+                    json!({"error": "not found"}).to_string(),
+                    "application/json",
+                )
+            };
 
         let response = format!(
             "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -421,10 +420,7 @@ impl MockJmapServer {
                 String::from_utf8_lossy(fake_pdf_content).to_string(),
             )
         } else {
-            (
-                "404 Not Found".to_string(),
-                "blob not found".to_string(),
-            )
+            ("404 Not Found".to_string(), "blob not found".to_string())
         }
     }
 

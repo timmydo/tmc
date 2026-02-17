@@ -31,6 +31,7 @@ pub fn run(
     sync_interval_secs: Option<u64>,
     archive_folder: String,
     deleted_folder: String,
+    reply_from: Option<String>,
     rules_mailbox_regex: String,
     my_email_regex: String,
     retention_policies: Vec<RetentionPolicyConfig>,
@@ -70,6 +71,7 @@ pub fn run(
     let mailbox_view = MailboxListView::new(
         cmd_tx.clone(),
         accounts[current_idx].username.clone(),
+        reply_from.clone(),
         page_size,
         account_names.clone(),
         accounts[current_idx].name.clone(),
@@ -202,6 +204,7 @@ pub fn run(
                                 let mailbox_view = MailboxListView::new(
                                     cmd_tx.clone(),
                                     account.username.clone(),
+                                    reply_from.clone(),
                                     page_size,
                                     account_names.clone(),
                                     account.name.clone(),

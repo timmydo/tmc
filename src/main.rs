@@ -419,6 +419,7 @@ fn main() {
         config.ui.sync_interval_secs,
         config.mail.archive_folder,
         config.mail.deleted_folder,
+        config.mail.reply_from,
         config.mail.rules_mailbox_regex,
         config.mail.my_email_regex,
         config.mail.retention_policies,

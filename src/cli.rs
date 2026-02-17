@@ -113,6 +113,15 @@ impl CliState {
         }
         None
     }
+
+    fn reply_from_header(&self) -> String {
+        self.config
+            .mail
+            .reply_from
+            .clone()
+            .or_else(|| self.connected_username.clone())
+            .unwrap_or_else(|| "user@example.com".to_string())
+    }
 }
 
 fn ok_response(data: Value) -> Value {
@@ -1284,11 +1293,8 @@ fn cmd_reply_draft(state: &mut CliState, input: &Value) -> Value {
             ..
         }) => match *boxed_result {
             Ok(email) => {
-                let from = state
-                    .connected_username
-                    .as_deref()
-                    .unwrap_or("user@example.com");
-                let draft = compose::build_reply_draft(&email, reply_all, from);
+                let from = state.reply_from_header();
+                let draft = compose::build_reply_draft(&email, reply_all, &from);
                 ok_response(json!({"draft": draft}))
             }
             Err(e) => err_response(&e),

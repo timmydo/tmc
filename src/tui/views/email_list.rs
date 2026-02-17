@@ -31,6 +31,7 @@ enum PendingWriteOp {
 pub struct EmailListView {
     cmd_tx: mpsc::Sender<BackendCommand>,
     from_address: String,
+    reply_from_address: String,
     mailbox_id: String,
     mailbox_name: String,
     page_size: u32,
@@ -43,7 +44,7 @@ pub struct EmailListView {
     loading_more: bool,
     error: Option<String>,
     pending_click: bool,
-    pending_reply_all_email_id: Option<String>,
+    pending_reply_request: Option<(String, bool)>,
     pending_compose: Option<String>,
     pending_rules_preview: Option<(String, RulesDryRunResult)>,
     mailboxes: Vec<Mailbox>,
@@ -65,6 +66,7 @@ impl EmailListView {
     pub fn new(
         cmd_tx: mpsc::Sender<BackendCommand>,
         from_address: String,
+        reply_from_address: String,
         mailbox_id: String,
         mailbox_name: String,
         page_size: u32,
@@ -75,6 +77,7 @@ impl EmailListView {
         EmailListView {
             cmd_tx,
             from_address,
+            reply_from_address,
             mailbox_id,
             mailbox_name,
             page_size,
@@ -87,7 +90,7 @@ impl EmailListView {
             loading_more: false,
             error: None,
             pending_click: false,
-            pending_reply_all_email_id: None,
+            pending_reply_request: None,
             pending_compose: None,
             pending_rules_preview: None,
             mailboxes,
@@ -295,6 +298,7 @@ impl EmailListView {
             let view = EmailView::new_thread(
                 self.cmd_tx.clone(),
                 self.from_address.clone(),
+                self.reply_from_address.clone(),
                 thread_id,
                 subject,
                 can_expire_now,
@@ -325,6 +329,7 @@ impl EmailListView {
             let view = ThreadView::new(
                 self.cmd_tx.clone(),
                 self.from_address.clone(),
+                self.reply_from_address.clone(),
                 thread_id,
                 subject,
                 self.mailboxes.clone(),
@@ -345,6 +350,7 @@ impl EmailListView {
         let view = EmailView::new(
             self.cmd_tx.clone(),
             self.from_address.clone(),
+            self.reply_from_address.clone(),
             email_id.clone(),
             self.is_in_deleted_folder(),
             self.mailboxes.clone(),
@@ -678,7 +684,7 @@ impl View for EmailListView {
                 ""
             };
             format!(
-                " {}/{} | q:back n/p:nav RET:read g:refresh R:reply-all e:dry-run E:run-rules a:archive d:delete{} f:flag u:unread m:move s:search{}{}",
+                " {}/{} | q:back n/p:nav RET:read g:refresh r:reply R:reply-all e:dry-run E:run-rules a:archive d:delete{} f:flag u:unread m:move s:search{}{}",
                 self.cursor + 1,
                 self.emails.len(),
                 expire_hint,
@@ -860,14 +866,28 @@ impl View for EmailListView {
             }
             Key::Char('R') => {
                 if let Some(email) = self.emails.get(self.cursor) {
-                    self.pending_reply_all_email_id = Some(email.id.clone());
+                    self.pending_reply_request = Some((email.id.clone(), true));
                     if let Err(e) = self.cmd_tx.send(BackendCommand::GetEmailForReply {
                         id: email.id.clone(),
                     }) {
-                        self.pending_reply_all_email_id = None;
+                        self.pending_reply_request = None;
                         self.status_message = Some(format!("Reply all failed to send: {}", e));
                     } else {
                         self.status_message = Some("Preparing reply-all draft...".to_string());
+                    }
+                }
+                ViewAction::Continue
+            }
+            Key::Char('r') => {
+                if let Some(email) = self.emails.get(self.cursor) {
+                    self.pending_reply_request = Some((email.id.clone(), false));
+                    if let Err(e) = self.cmd_tx.send(BackendCommand::GetEmailForReply {
+                        id: email.id.clone(),
+                    }) {
+                        self.pending_reply_request = None;
+                        self.status_message = Some(format!("Reply failed to send: {}", e));
+                    } else {
+                        self.status_message = Some("Preparing reply draft...".to_string());
                     }
                 }
                 ViewAction::Continue
@@ -1142,15 +1162,25 @@ impl View for EmailListView {
                 }
             }
             BackendResponse::EmailForReply { id, result } => {
-                if self.pending_reply_all_email_id.as_deref() == Some(id.as_str()) {
-                    self.pending_reply_all_email_id = None;
+                if self
+                    .pending_reply_request
+                    .as_ref()
+                    .map(|(pending_id, _)| pending_id.as_str())
+                    == Some(id.as_str())
+                {
+                    let (_, reply_all) = self.pending_reply_request.take().unwrap();
                     match result.as_ref() {
                         Ok(email) => {
-                            let draft = compose::build_reply_draft(email, true, &self.from_address);
+                            let draft = compose::build_reply_draft(
+                                email,
+                                reply_all,
+                                &self.reply_from_address,
+                            );
                             self.pending_compose = Some(draft);
                         }
                         Err(e) => {
-                            self.status_message = Some(format!("Reply all failed: {}", e));
+                            let action = if reply_all { "Reply all" } else { "Reply" };
+                            self.status_message = Some(format!("{} failed: {}", action, e));
                         }
                     }
                     true
