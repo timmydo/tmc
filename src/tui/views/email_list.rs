@@ -1139,11 +1139,15 @@ impl View for EmailListView {
             } => {
                 if let Some(pending) = self.pending_write_ops.remove(op_id) {
                     match result {
-                        Ok(()) => {
-                            if let PendingWriteOp::Seen { .. } = pending {
+                        Ok(()) => match &pending {
+                            PendingWriteOp::Seen { .. } => {
                                 self.request_refresh("email_list.seen_mutation_followup");
                             }
-                        }
+                            PendingWriteOp::Move { .. } => {
+                                self.request_refresh("email_list.move_mutation_followup");
+                            }
+                            _ => {}
+                        },
                         Err(e) => {
                             self.rollback_pending_write(pending);
                             let action_label = match action {

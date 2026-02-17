@@ -598,11 +598,12 @@ impl View for ThreadView {
             } => {
                 if let Some(pending) = self.pending_write_ops.remove(op_id) {
                     match result {
-                        Ok(()) => {
-                            if let PendingWriteOp::Seen { .. } = pending {
+                        Ok(()) => match &pending {
+                            PendingWriteOp::Seen { .. } | PendingWriteOp::Move { .. } => {
                                 self.request_refresh();
                             }
-                        }
+                            _ => {}
+                        },
                         Err(e) => {
                             self.rollback_pending_write(pending);
                             let action_label = match action {
