@@ -25,6 +25,7 @@ pub fn run(
     client: JmapClient,
     accounts: Vec<AccountConfig>,
     current_account_idx: usize,
+    initial_account_name: String,
     page_size: u32,
     editor: Option<String>,
     mouse: bool,
@@ -58,6 +59,7 @@ pub fn run(
     })?);
     let (mut cmd_tx, mut resp_rx) = backend::spawn(
         client,
+        initial_account_name,
         rules.clone(),
         custom_headers.clone(),
         rules_mailbox_regex.clone(),
@@ -193,6 +195,7 @@ pub fn run(
                             Ok(new_client) => {
                                 let (new_cmd_tx, new_resp_rx) = backend::spawn(
                                     new_client,
+                                    account.name.clone(),
                                     rules.clone(),
                                     custom_headers.clone(),
                                     rules_mailbox_regex.clone(),

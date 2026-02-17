@@ -2,6 +2,7 @@
 mod log;
 
 mod backend;
+mod cache;
 mod cli;
 mod compose;
 mod config;
@@ -267,6 +268,7 @@ fn main() {
         eprintln!("Options:");
         eprintln!("  --config=PATH    Use config file at PATH instead of default");
         eprintln!("  --rules=PATH     Use rules file at PATH instead of default");
+        eprintln!("  --clear-cache    Delete all local email cache files");
         eprintln!("  --clear-log      Truncate the log file at startup");
         eprintln!("  --log            View the log file in $PAGER");
         eprintln!("  --print-rules    Parse and print rules.toml");
@@ -275,6 +277,11 @@ fn main() {
         eprintln!("  --help-cli       Print CLI mode protocol documentation");
         eprintln!("  --help           Show this help");
         std::process::exit(0);
+    }
+
+    if args.iter().any(|a| a == "--clear-cache") {
+        cache::Cache::clear_all_accounts();
+        eprintln!("Cache cleared.");
     }
 
     if args.iter().any(|a| a == "--clear-log") {
@@ -408,11 +415,14 @@ fn main() {
         }
     };
 
+    let first_account_name = first_account.name.clone();
+
     // Enter TUI
     if let Err(e) = tui::run(
         client,
         config.accounts,
         0,
+        first_account_name,
         config.ui.page_size,
         config.ui.editor,
         config.ui.mouse,

@@ -121,7 +121,7 @@ pub struct EmailQueryResult {
     pub position: u32,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Email {
     pub id: String,
@@ -163,7 +163,7 @@ pub struct Email {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct EmailAddress {
     #[serde(default)]
     pub name: Option<String>,
@@ -182,7 +182,7 @@ impl std::fmt::Display for EmailAddress {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct BodyPart {
     pub part_id: String,
@@ -196,7 +196,7 @@ pub struct BodyPart {
     pub size: Option<u64>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct BodyValue {
     pub value: String,

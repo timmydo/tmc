@@ -1,3 +1,4 @@
+use crate::cache::Cache;
 use crate::config::RetentionPolicyConfig;
 use crate::jmap::client::JmapClient;
 use crate::jmap::types::{Email, Mailbox};
@@ -236,6 +237,7 @@ pub enum EmailMutationAction {
 /// Spawn the backend thread. Returns the command sender and response receiver.
 pub fn spawn(
     client: JmapClient,
+    account_name: String,
     rules: Arc<Vec<CompiledRule>>,
     custom_headers: Arc<Vec<String>>,
     rules_mailbox_regex: Arc<Regex>,
@@ -248,6 +250,20 @@ pub fn spawn(
     let (resp_tx, resp_rx) = mpsc::channel::<BackendResponse>();
 
     thread::spawn(move || {
+        let cache = match Cache::open(&account_name) {
+            Ok(c) => {
+                log_info!("[Backend] Opened cache for account '{}'", account_name);
+                Some(c)
+            }
+            Err(e) => {
+                log_warn!(
+                    "[Backend] Failed to open cache for '{}': {} (proceeding without cache)",
+                    account_name,
+                    e
+                );
+                None
+            }
+        };
         backend_loop(
             client,
             cmd_rx,
@@ -256,12 +272,14 @@ pub fn spawn(
             custom_headers,
             rules_mailbox_regex,
             my_email_regex,
+            cache,
         );
     });
 
     (cmd_tx, resp_rx)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn backend_loop(
     client: JmapClient,
     cmd_rx: mpsc::Receiver<BackendCommand>,
@@ -270,6 +288,7 @@ fn backend_loop(
     custom_headers: Arc<Vec<String>>,
     rules_mailbox_regex: Arc<Regex>,
     my_email_regex: Arc<Regex>,
+    cache: Option<Cache>,
 ) {
     let mut cached_mailboxes: Vec<Mailbox> = Vec::new();
     let mut command_seq: u64 = 0;
@@ -347,7 +366,12 @@ fn backend_loop(
                         fetch_emails_chunked(&client, &query.ids, &custom_headers)
                     }?;
 
-                    // Apply filtering rules
+                    // Cache fetched emails
+                    if let Some(ref cache) = cache {
+                        cache.put_emails(&emails);
+                    }
+
+                    // Apply filtering rules (only to unprocessed emails)
                     if !rules.is_empty() {
                         let mailbox_name = cached_mailboxes
                             .iter()
@@ -355,24 +379,55 @@ fn backend_loop(
                             .map(|m| m.name.as_str())
                             .unwrap_or("");
                         if rules_mailbox_regex.is_match(mailbox_name) {
-                            let applications = rules::apply_rules(
-                                &rules,
-                                &emails,
-                                &cached_mailboxes,
-                                &my_email_regex,
-                            );
-                            if !applications.is_empty() {
-                                log_info!(
-                                    "[Rules] Applying {} rule action(s) to fetched emails in mailbox '{}' (query origin='{}')",
-                                    applications.len(),
-                                    mailbox_name,
-                                    origin
-                                );
-                                rules::execute_rule_actions(
-                                    &applications,
+                            let emails_for_rules = if let Some(ref cache) = cache {
+                                let all_ids: Vec<String> =
+                                    emails.iter().map(|e| e.id.clone()).collect();
+                                let unprocessed_ids = cache.filter_unprocessed(&all_ids);
+                                if unprocessed_ids.len() < emails.len() {
+                                    log_info!(
+                                        "[Rules] Filtered {}/{} emails as already processed",
+                                        emails.len() - unprocessed_ids.len(),
+                                        emails.len()
+                                    );
+                                }
+                                let unprocessed_set: HashSet<&str> =
+                                    unprocessed_ids.iter().map(|s| s.as_str()).collect();
+                                emails
+                                    .iter()
+                                    .filter(|e| unprocessed_set.contains(e.id.as_str()))
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                            } else {
+                                emails.clone()
+                            };
+
+                            if !emails_for_rules.is_empty() {
+                                let applications = rules::apply_rules(
+                                    &rules,
+                                    &emails_for_rules,
                                     &cached_mailboxes,
-                                    &client,
+                                    &my_email_regex,
                                 );
+                                if !applications.is_empty() {
+                                    log_info!(
+                                        "[Rules] Applying {} rule action(s) to fetched emails in mailbox '{}' (query origin='{}')",
+                                        applications.len(),
+                                        mailbox_name,
+                                        origin
+                                    );
+                                    rules::execute_rule_actions(
+                                        &applications,
+                                        &cached_mailboxes,
+                                        &client,
+                                    );
+                                }
+                            }
+
+                            // Mark all fetched emails as processed
+                            if let Some(ref cache) = cache {
+                                let all_ids: Vec<String> =
+                                    emails.iter().map(|e| e.id.clone()).collect();
+                                cache.mark_rules_processed(&all_ids);
                             }
                         } else {
                             log_debug!(
@@ -440,10 +495,23 @@ fn backend_loop(
                 });
             }
             BackendCommand::GetEmail { id } => {
-                let result = client
-                    .get_email(&id)
-                    .map_err(|e| e.to_string())
-                    .and_then(|opt| opt.ok_or_else(|| "Email not found".to_string()));
+                // Check cache first
+                let cached_email = cache.as_ref().and_then(|c| c.get_email(&id));
+                let result = if let Some(email) = cached_email {
+                    log_debug!("[Backend] Cache hit for email {}", id);
+                    Ok(email)
+                } else {
+                    let r = client
+                        .get_email(&id)
+                        .map_err(|e| e.to_string())
+                        .and_then(|opt| opt.ok_or_else(|| "Email not found".to_string()));
+                    if let Ok(ref email) = r {
+                        if let Some(ref cache) = cache {
+                            cache.put_emails(std::slice::from_ref(email));
+                        }
+                    }
+                    r
+                };
 
                 let _ = resp_tx.send(BackendResponse::EmailBody {
                     id,
@@ -721,6 +789,7 @@ fn backend_loop(
                     &custom_headers,
                     &my_email_regex,
                     &mailbox_id,
+                    cache.as_ref(),
                 );
                 let _ = resp_tx.send(BackendResponse::RulesRun {
                     mailbox_id,
@@ -785,6 +854,7 @@ fn run_rules_for_mailbox(
     custom_headers: &[String],
     my_email_regex: &Regex,
     mailbox_id: &str,
+    cache: Option<&Cache>,
 ) -> Result<RulesRunResult, String> {
     if rules.is_empty() {
         return Ok(RulesRunResult {
@@ -810,6 +880,13 @@ fn run_rules_for_mailbox(
     let actions = applications.iter().map(|a| a.actions.len()).sum::<usize>();
     if !applications.is_empty() {
         rules::execute_rule_actions(&applications, mailboxes, client);
+    }
+
+    // Mark all scanned emails as processed (explicit run bypasses processed check
+    // but still marks them so future auto-runs skip them)
+    if let Some(cache) = cache {
+        let all_ids: Vec<String> = emails.iter().map(|e| e.id.clone()).collect();
+        cache.mark_rules_processed(&all_ids);
     }
 
     Ok(RulesRunResult {
