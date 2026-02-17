@@ -695,34 +695,39 @@ impl JmapClient {
 
         log_info!("[JMAP] Email/set marking {} emails as read", ids.len());
 
-        let mut update = serde_json::Map::new();
-        for id in ids {
-            update.insert(id.clone(), json!({ "keywords/$seen": true }));
-        }
+        // Batch into chunks to avoid requestTooLarge errors from the server
+        const BATCH_SIZE: usize = 500;
+        for chunk in ids.chunks(BATCH_SIZE) {
+            let mut update = serde_json::Map::new();
+            for id in chunk {
+                update.insert(id.clone(), json!({ "keywords/$seen": true }));
+            }
 
-        let request = JmapRequest {
-            using: vec!["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
-            method_calls: vec![MethodCall(
-                "Email/set",
-                json!({
-                    "accountId": self.account_id,
-                    "update": update
-                }),
-                "0".to_string(),
-            )],
-        };
+            let request = JmapRequest {
+                using: vec!["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+                method_calls: vec![MethodCall(
+                    "Email/set",
+                    json!({
+                        "accountId": self.account_id,
+                        "update": update
+                    }),
+                    "0".to_string(),
+                )],
+            };
 
-        let response = self.call(request)?;
+            let response = self.call(request)?;
 
-        if let Some(method_response) = response.method_responses.first() {
-            if method_response.0 == "Email/set" {
-                return Ok(());
+            match response.method_responses.first() {
+                Some(method_response) if method_response.0 == "Email/set" => {}
+                _ => {
+                    return Err(JmapError::Api(
+                        "Unexpected response for Email/set".to_string(),
+                    ));
+                }
             }
         }
 
-        Err(JmapError::Api(
-            "Unexpected response for Email/set".to_string(),
-        ))
+        Ok(())
     }
 
     pub fn mark_email_read(&self, id: &str) -> Result<(), JmapError> {
