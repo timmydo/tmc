@@ -1,7 +1,9 @@
 use std::fs;
 use std::io;
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Build a blank compose draft template.
 pub fn build_compose_draft(from: &str) -> String {
@@ -265,19 +267,57 @@ fn html_to_plain(html: &str) -> String {
 
 /// Write content to a temp file with restrictive permissions (0600).
 pub fn write_temp_file(content: &str) -> io::Result<PathBuf> {
-    let dir = std::env::temp_dir();
-    let filename = format!("tmc-draft-{}.eml", std::process::id());
+    let dir = draft_dir();
+    fs::create_dir_all(&dir)?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let filename = format!("tmc-draft-{}-{}.eml", std::process::id(), ts);
     let path = dir.join(filename);
 
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .open(&path)?;
 
     io::Write::write_all(&mut file, content.as_bytes())?;
     Ok(path)
+}
+
+fn draft_dir() -> PathBuf {
+    draft_dir_from_env(
+        std::env::var("XDG_RUNTIME_DIR").ok(),
+        std::env::var("XDG_STATE_HOME").ok(),
+        std::env::var("HOME").ok(),
+    )
+}
+
+fn draft_dir_from_env(
+    xdg_runtime_dir: Option<String>,
+    xdg_state_home: Option<String>,
+    home: Option<String>,
+) -> PathBuf {
+    if let Some(runtime_dir) = xdg_runtime_dir {
+        let trimmed = runtime_dir.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed).join("tmc").join("drafts");
+        }
+    }
+
+    let state_dir = if let Some(xdg) = xdg_state_home {
+        PathBuf::from(xdg)
+    } else if let Some(home) = home {
+        PathBuf::from(home).join(".local").join("state")
+    } else {
+        PathBuf::from(".")
+    };
+
+    state_dir.join("tmc").join("drafts")
 }
 
 #[cfg(test)]
@@ -463,5 +503,43 @@ mod tests {
         assert!(draft.contains("Subject: Fwd: Already forwarded\n"));
         // Should not double-prefix
         assert!(!draft.contains("Fwd: Fwd:"));
+    }
+
+    #[test]
+    fn test_draft_dir_uses_xdg_runtime_dir() {
+        assert_eq!(
+            draft_dir_from_env(
+                Some("/tmp/runtime-test".to_string()),
+                Some("/tmp/state-test".to_string()),
+                Some("/home/example".to_string())
+            ),
+            PathBuf::from("/tmp/runtime-test")
+                .join("tmc")
+                .join("drafts")
+        );
+    }
+
+    #[test]
+    fn test_draft_dir_falls_back_to_state_home() {
+        assert_eq!(
+            draft_dir_from_env(
+                None,
+                Some("/tmp/state-test".to_string()),
+                Some("/home/example".to_string())
+            ),
+            PathBuf::from("/tmp/state-test").join("tmc").join("drafts")
+        );
+    }
+
+    #[test]
+    fn test_draft_dir_falls_back_to_home_state() {
+        assert_eq!(
+            draft_dir_from_env(None, None, Some("/home/example".to_string())),
+            PathBuf::from("/home/example")
+                .join(".local")
+                .join("state")
+                .join("tmc")
+                .join("drafts")
+        );
     }
 }
