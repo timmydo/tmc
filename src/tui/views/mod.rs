@@ -10,6 +10,20 @@ use super::input::Key;
 use super::screen::Terminal;
 use crate::backend::BackendResponse;
 use std::io;
+use std::time::SystemTime;
+
+pub fn format_system_time(time: SystemTime) -> String {
+    let duration = time
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = duration.as_secs();
+    let timestamp = secs as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::localtime_r(&timestamp, &mut tm);
+    }
+    format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
+}
 
 pub enum ViewAction {
     Continue,

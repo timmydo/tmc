@@ -7,9 +7,10 @@ use crate::tui::screen::Terminal;
 use crate::tui::views::email_list::EmailListView;
 use crate::tui::views::help::HelpView;
 use crate::tui::views::retention_preview::RetentionPreviewView;
-use crate::tui::views::{View, ViewAction};
+use crate::tui::views::{format_system_time, View, ViewAction};
 use std::io;
 use std::sync::mpsc;
+use std::time::SystemTime;
 
 pub struct MailboxListView {
     cmd_tx: mpsc::Sender<BackendCommand>,
@@ -31,6 +32,7 @@ pub struct MailboxListView {
     create_mode: bool,
     create_input: String,
     delete_confirm_mode: bool,
+    last_refreshed: Option<SystemTime>,
 }
 
 impl MailboxListView {
@@ -65,6 +67,7 @@ impl MailboxListView {
             create_mode: false,
             create_input: String::new(),
             delete_confirm_mode: false,
+            last_refreshed: None,
         }
     }
 
@@ -130,10 +133,17 @@ impl View for MailboxListView {
         // Header
         term.move_to(1, 1)?;
         term.set_bold()?;
-        let header = if self.account_names.len() > 1 {
-            format!("tmc - {}", self.current_account)
-        } else {
-            "tmc - Timmy's Mail Console".to_string()
+        let header = {
+            let title = if self.account_names.len() > 1 {
+                format!("tmc - {}", self.current_account)
+            } else {
+                "tmc - Timmy's Mail Console".to_string()
+            };
+            if let Some(ts) = self.last_refreshed {
+                format!("{} (refreshed {})", title, format_system_time(ts))
+            } else {
+                title
+            }
         };
         term.write_truncated(&header, term.cols)?;
         term.reset_attr()?;
@@ -515,6 +525,7 @@ impl View for MailboxListView {
                         Self::sort_mailboxes(&mut mailboxes);
                         self.mailboxes = mailboxes;
                         self.error = None;
+                        self.last_refreshed = Some(SystemTime::now());
                         if self.cursor >= self.mailboxes.len() && !self.mailboxes.is_empty() {
                             self.cursor = self.mailboxes.len() - 1;
                         }

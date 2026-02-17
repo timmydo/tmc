@@ -8,10 +8,11 @@ use crate::tui::views::email_view::EmailView;
 use crate::tui::views::help::HelpView;
 use crate::tui::views::rules_preview::RulesPreviewView;
 use crate::tui::views::thread_view::ThreadView;
-use crate::tui::views::{View, ViewAction};
+use crate::tui::views::{format_system_time, View, ViewAction};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::mpsc;
+use std::time::SystemTime;
 
 enum PendingWriteOp {
     Flag {
@@ -60,6 +61,7 @@ pub struct EmailListView {
     scroll_offset: usize,
     archive_folder: String,
     deleted_folder: String,
+    last_refreshed: Option<SystemTime>,
 }
 
 impl EmailListView {
@@ -106,6 +108,7 @@ impl EmailListView {
             scroll_offset: 0,
             archive_folder,
             deleted_folder,
+            last_refreshed: None,
         }
     }
 
@@ -556,18 +559,25 @@ impl View for EmailListView {
         // Header
         term.move_to(1, 1)?;
         term.set_bold()?;
-        let header = if let Some(ref query) = self.active_search {
-            match self.total {
-                Some(total) => format!(
-                    "{} [search: {}] ({} results)",
-                    self.mailbox_name, query, total
-                ),
-                None => format!("{} [search: {}]", self.mailbox_name, query),
-            }
-        } else {
-            match self.total {
-                Some(total) => format!("{} ({} messages)", self.mailbox_name, total),
-                None => self.mailbox_name.clone(),
+        let header = {
+            let base = if let Some(ref query) = self.active_search {
+                match self.total {
+                    Some(total) => format!(
+                        "{} [search: {}] ({} results)",
+                        self.mailbox_name, query, total
+                    ),
+                    None => format!("{} [search: {}]", self.mailbox_name, query),
+                }
+            } else {
+                match self.total {
+                    Some(total) => format!("{} ({} messages)", self.mailbox_name, total),
+                    None => self.mailbox_name.clone(),
+                }
+            };
+            if let Some(ts) = self.last_refreshed {
+                format!("{} (refreshed {})", base, format_system_time(ts))
+            } else {
+                base
             }
         };
         term.write_truncated(&header, term.cols)?;
@@ -1101,6 +1111,7 @@ impl View for EmailListView {
                 self.next_query_position = position.saturating_add(*loaded);
                 match emails {
                     Ok(emails) => {
+                        self.last_refreshed = Some(SystemTime::now());
                         if *position == 0 {
                             self.emails = emails.clone();
                             self.pending_write_ops.clear();
