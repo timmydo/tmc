@@ -71,6 +71,25 @@ fn wrap_line(s: &str, max_width: usize) -> Vec<&str> {
     result
 }
 
+/// Heuristic check: does this text look like HTML rather than plain text?
+/// Checks for common HTML structural tags anywhere in the content.
+fn looks_like_html(text: &str) -> bool {
+    // Check a reasonable prefix to avoid scanning huge bodies
+    let sample = if text.len() > 2000 {
+        &text[..2000]
+    } else {
+        text
+    };
+    let lower = sample.to_ascii_lowercase();
+    lower.contains("<!doctype")
+        || lower.contains("<html")
+        || lower.contains("<head")
+        || lower.contains("<body")
+        || lower.contains("<style")
+        || lower.contains("<table")
+        || lower.contains("<div")
+}
+
 /// Convert HTML to terminal-formatted text with ANSI escape codes for
 /// bold, underline, color, etc. using html2text's rich rendering mode.
 fn html_to_terminal(html: &str) -> String {
@@ -350,17 +369,29 @@ impl EmailView {
     }
 
     fn extract_body(email: &Email) -> String {
-        if let Some(ref text_body) = email.text_body {
-            for part in text_body {
-                if let Some(value) = email.body_values.get(&part.part_id) {
-                    return value.value.clone();
-                }
-            }
-        }
+        // Try htmlBody first if available — it's the canonical rich version
+        // and html2text handles rendering it to terminal text reliably.
         if let Some(ref html_body) = email.html_body {
             for part in html_body {
                 if let Some(value) = email.body_values.get(&part.part_id) {
                     return html_to_terminal(&value.value);
+                }
+            }
+        }
+        // Fall back to textBody (plain text)
+        if let Some(ref text_body) = email.text_body {
+            for part in text_body {
+                if let Some(value) = email.body_values.get(&part.part_id) {
+                    if looks_like_html(&value.value)
+                        || part
+                            .r#type
+                            .as_deref()
+                            .map(|t| t.eq_ignore_ascii_case("text/html"))
+                            .unwrap_or(false)
+                    {
+                        return html_to_terminal(&value.value);
+                    }
+                    return value.value.clone();
                 }
             }
         }

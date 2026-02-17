@@ -187,13 +187,8 @@ fn format_address_list(addrs: &[crate::jmap::types::EmailAddress]) -> String {
 }
 
 pub(crate) fn extract_body_text(email: &crate::jmap::types::Email) -> String {
-    if let Some(ref text_body) = email.text_body {
-        for part in text_body {
-            if let Some(value) = email.body_values.get(&part.part_id) {
-                return value.value.clone();
-            }
-        }
-    }
+    // Prefer htmlBody when available — html2text converts it to clean plain text,
+    // avoiding garbled output from bad text/plain alternatives in marketing emails.
     if let Some(ref html_body) = email.html_body {
         for part in html_body {
             if let Some(value) = email.body_values.get(&part.part_id) {
@@ -201,7 +196,41 @@ pub(crate) fn extract_body_text(email: &crate::jmap::types::Email) -> String {
             }
         }
     }
+    if let Some(ref text_body) = email.text_body {
+        for part in text_body {
+            if let Some(value) = email.body_values.get(&part.part_id) {
+                if looks_like_html(&value.value)
+                    || part
+                        .r#type
+                        .as_deref()
+                        .map(|t| t.eq_ignore_ascii_case("text/html"))
+                        .unwrap_or(false)
+                {
+                    return html_to_plain(&value.value);
+                }
+                return value.value.clone();
+            }
+        }
+    }
     email.preview.as_deref().unwrap_or("(no body)").to_string()
+}
+
+/// Heuristic check: does this text look like HTML rather than plain text?
+/// Checks for common HTML structural tags anywhere in the content.
+fn looks_like_html(text: &str) -> bool {
+    let sample = if text.len() > 2000 {
+        &text[..2000]
+    } else {
+        text
+    };
+    let lower = sample.to_ascii_lowercase();
+    lower.contains("<!doctype")
+        || lower.contains("<html")
+        || lower.contains("<head")
+        || lower.contains("<body")
+        || lower.contains("<style")
+        || lower.contains("<table")
+        || lower.contains("<div")
 }
 
 /// Convert HTML to plain text (no ANSI formatting). Used for drafts and CLI.
