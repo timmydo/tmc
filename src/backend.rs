@@ -256,8 +256,8 @@ pub fn spawn(
                 Some(c)
             }
             Err(e) => {
-                log_warn!(
-                    "[Backend] Failed to open cache for '{}': {} (proceeding without cache)",
+                log_debug!(
+                    "[Backend] Cache unavailable for '{}': {} (proceeding without cache)",
                     account_name,
                     e
                 );
