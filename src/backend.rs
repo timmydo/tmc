@@ -302,9 +302,24 @@ fn backend_loop(
                     command_seq,
                     origin
                 );
+
+                // Serve cached mailboxes instantly
+                if let Some(ref cache) = cache {
+                    if let Some(cached_mboxes) = cache.get_mailboxes() {
+                        if !cached_mboxes.is_empty() {
+                            log_info!("[Backend] Serving {} cached mailboxes", cached_mboxes.len());
+                            cached_mailboxes = cached_mboxes.clone();
+                            let _ = resp_tx.send(BackendResponse::Mailboxes(Ok(cached_mboxes)));
+                        }
+                    }
+                }
+
                 let result = client.get_mailboxes().map_err(|e| e.to_string());
                 if let Ok(ref mailboxes) = result {
                     cached_mailboxes = mailboxes.clone();
+                    if let Some(ref cache) = cache {
+                        cache.put_mailboxes(mailboxes);
+                    }
                 }
                 let _ = resp_tx.send(BackendResponse::Mailboxes(result));
             }
@@ -346,6 +361,35 @@ fn backend_loop(
                     received_after,
                     received_before
                 );
+
+                // Serve cached mailbox emails instantly (only for first page, no search/date filters)
+                if position == 0
+                    && search_query.is_none()
+                    && received_after.is_none()
+                    && received_before.is_none()
+                {
+                    if let Some(ref cache) = cache {
+                        if let Some(cached_emails) = cache.get_mailbox_emails(&mailbox_id) {
+                            if !cached_emails.is_empty() {
+                                log_info!(
+                                    "[Backend] Serving {} cached emails for mailbox '{}'",
+                                    cached_emails.len(),
+                                    mailbox_id
+                                );
+                                let loaded = cached_emails.len() as u32;
+                                let _ = resp_tx.send(BackendResponse::Emails {
+                                    mailbox_id: mailbox_id.clone(),
+                                    emails: Ok(cached_emails),
+                                    total: None,
+                                    position: 0,
+                                    loaded,
+                                    thread_counts: HashMap::new(),
+                                });
+                            }
+                        }
+                    }
+                }
+
                 let result = (|| {
                     let query = client
                         .query_emails(
@@ -369,6 +413,15 @@ fn backend_loop(
                     // Cache fetched emails
                     if let Some(ref cache) = cache {
                         cache.put_emails(&emails);
+                        // Update mailbox index for first-page non-search queries
+                        if position == 0
+                            && search_query.is_none()
+                            && received_after.is_none()
+                            && received_before.is_none()
+                        {
+                            let ids: Vec<String> = emails.iter().map(|e| e.id.clone()).collect();
+                            cache.put_mailbox_index(&mailbox_id, &ids);
+                        }
                     }
 
                     // Apply filtering rules (only to unprocessed emails)

@@ -1,9 +1,11 @@
-use crate::jmap::types::Email;
+use crate::jmap::types::{Email, Mailbox};
 use redb::{Database, TableDefinition};
 use std::path::PathBuf;
 
 const EMAILS: TableDefinition<&str, &[u8]> = TableDefinition::new("emails");
 const RULES_PROCESSED: TableDefinition<&str, &[u8]> = TableDefinition::new("rules_processed");
+const MAILBOX_INDEX: TableDefinition<&str, &[u8]> = TableDefinition::new("mailbox_index");
+const MAILBOXES: TableDefinition<&str, &[u8]> = TableDefinition::new("mailboxes");
 
 pub struct Cache {
     db: Database,
@@ -41,6 +43,8 @@ impl Cache {
         {
             let _ = txn.open_table(EMAILS);
             let _ = txn.open_table(RULES_PROCESSED);
+            let _ = txn.open_table(MAILBOX_INDEX);
+            let _ = txn.open_table(MAILBOXES);
         }
         txn.commit().map_err(|e| format!("cache commit: {}", e))?;
 
@@ -81,6 +85,88 @@ impl Cache {
         }
         if let Err(e) = txn.commit() {
             log_warn!("[Cache] failed to commit emails: {}", e);
+        }
+    }
+
+    pub fn get_mailbox_emails(&self, mailbox_id: &str) -> Option<Vec<Email>> {
+        let txn = self.db.begin_read().ok()?;
+        let index_table = txn.open_table(MAILBOX_INDEX).ok()?;
+        let value = index_table.get(mailbox_id).ok()??;
+        let email_ids: Vec<String> = serde_json::from_slice(value.value()).ok()?;
+        if email_ids.is_empty() {
+            return Some(Vec::new());
+        }
+
+        let email_table = txn.open_table(EMAILS).ok()?;
+        let mut emails = Vec::with_capacity(email_ids.len());
+        for id in &email_ids {
+            if let Some(entry) = email_table.get(id.as_str()).ok()? {
+                if let Ok(email) = serde_json::from_slice::<Email>(entry.value()) {
+                    emails.push(email);
+                }
+            }
+        }
+        if emails.is_empty() {
+            None
+        } else {
+            Some(emails)
+        }
+    }
+
+    pub fn put_mailbox_index(&self, mailbox_id: &str, email_ids: &[String]) {
+        let txn = match self.db.begin_write() {
+            Ok(t) => t,
+            Err(e) => {
+                log_warn!("[Cache] failed to begin write txn: {}", e);
+                return;
+            }
+        };
+        {
+            let mut table = match txn.open_table(MAILBOX_INDEX) {
+                Ok(t) => t,
+                Err(e) => {
+                    log_warn!("[Cache] failed to open mailbox_index table: {}", e);
+                    return;
+                }
+            };
+            if let Ok(bytes) = serde_json::to_vec(email_ids) {
+                let _ = table.insert(mailbox_id, bytes.as_slice());
+            }
+        }
+        if let Err(e) = txn.commit() {
+            log_warn!("[Cache] failed to commit mailbox_index: {}", e);
+        }
+    }
+
+    pub fn get_mailboxes(&self) -> Option<Vec<Mailbox>> {
+        let txn = self.db.begin_read().ok()?;
+        let table = txn.open_table(MAILBOXES).ok()?;
+        let value = table.get("mailboxes").ok()??;
+        serde_json::from_slice(value.value()).ok()
+    }
+
+    pub fn put_mailboxes(&self, mailboxes: &[Mailbox]) {
+        let txn = match self.db.begin_write() {
+            Ok(t) => t,
+            Err(e) => {
+                log_warn!("[Cache] failed to begin write txn: {}", e);
+                return;
+            }
+        };
+        {
+            let mut table = match txn.open_table(MAILBOXES) {
+                Ok(t) => t,
+                Err(e) => {
+                    log_warn!("[Cache] failed to open mailboxes table: {}", e);
+                    return;
+                }
+            };
+            if let Ok(bytes) = serde_json::to_vec(mailboxes) {
+                let _ = table.insert("mailboxes", bytes.as_slice());
+            }
+        }
+        if let Err(e) = txn.commit() {
+            log_warn!("[Cache] failed to commit mailboxes: {}", e);
         }
     }
 
@@ -195,6 +281,32 @@ impl Cache {
                     let _ = table.remove(id.as_str());
                 }
             }
+            if let Ok(mut table) = txn.open_table(MAILBOX_INDEX) {
+                let ids: Vec<String> = table
+                    .iter()
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|entry| entry.ok())
+                    .map(|(k, _)| k.value().to_string())
+                    .collect();
+                for id in &ids {
+                    let _ = table.remove(id.as_str());
+                }
+            }
+            if let Ok(mut table) = txn.open_table(MAILBOXES) {
+                let ids: Vec<String> = table
+                    .iter()
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|entry| entry.ok())
+                    .map(|(k, _)| k.value().to_string())
+                    .collect();
+                for id in &ids {
+                    let _ = table.remove(id.as_str());
+                }
+            }
         }
         let _ = txn.commit();
     }
@@ -264,6 +376,77 @@ mod tests {
 
         let unprocessed = cache.filter_unprocessed(&["e1".into(), "e2".into(), "e3".into()]);
         assert_eq!(unprocessed, vec!["e3".to_string()]);
+    }
+
+    #[test]
+    fn test_cache_mailboxes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CACHE_HOME", dir.path());
+        let cache = Cache::open("test_mailboxes").unwrap();
+
+        assert!(cache.get_mailboxes().is_none());
+
+        let mailboxes = vec![
+            Mailbox {
+                id: "m1".into(),
+                name: "Inbox".into(),
+                parent_id: None,
+                role: Some("inbox".into()),
+                total_emails: 42,
+                unread_emails: 3,
+                sort_order: 1,
+            },
+            Mailbox {
+                id: "m2".into(),
+                name: "Sent".into(),
+                parent_id: None,
+                role: Some("sent".into()),
+                total_emails: 100,
+                unread_emails: 0,
+                sort_order: 2,
+            },
+        ];
+        cache.put_mailboxes(&mailboxes);
+
+        let cached = cache.get_mailboxes().unwrap();
+        assert_eq!(cached.len(), 2);
+        assert_eq!(cached[0].id, "m1");
+        assert_eq!(cached[0].name, "Inbox");
+        assert_eq!(cached[0].unread_emails, 3);
+        assert_eq!(cached[1].id, "m2");
+        assert_eq!(cached[1].name, "Sent");
+    }
+
+    #[test]
+    fn test_cache_mailbox_index() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CACHE_HOME", dir.path());
+        let cache = Cache::open("test_mbx_idx").unwrap();
+
+        // No index yet
+        assert!(cache.get_mailbox_emails("mbx1").is_none());
+
+        // Store emails and index
+        let e1 = make_test_email("e1");
+        let e2 = make_test_email("e2");
+        cache.put_emails(&[e1.clone(), e2.clone()]);
+        cache.put_mailbox_index("mbx1", &["e1".into(), "e2".into()]);
+
+        let cached = cache.get_mailbox_emails("mbx1").unwrap();
+        assert_eq!(cached.len(), 2);
+        assert_eq!(cached[0].id, "e1");
+        assert_eq!(cached[1].id, "e2");
+
+        // Index with missing email returns only found ones
+        cache.put_mailbox_index("mbx2", &["e1".into(), "missing".into()]);
+        let cached = cache.get_mailbox_emails("mbx2").unwrap();
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].id, "e1");
+
+        // Empty index returns empty vec
+        cache.put_mailbox_index("mbx3", &[]);
+        let cached = cache.get_mailbox_emails("mbx3").unwrap();
+        assert!(cached.is_empty());
     }
 
     #[test]

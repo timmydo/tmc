@@ -69,7 +69,7 @@ pub struct MethodResponse(
 );
 
 // Mailbox types
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Mailbox {
     pub id: String,
