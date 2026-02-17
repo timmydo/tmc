@@ -3,6 +3,7 @@ mod mock_jmap;
 use mock_jmap::MockJmapServer;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
 struct CliHarness {
@@ -302,4 +303,43 @@ fn test_mark_read_unread() {
     let resp = h.send(json!({"command": "mark_unread", "id": "email-002"}));
     assert_eq!(resp["ok"], true, "mark_unread failed: {}", resp);
     assert_eq!(resp["action"], "MarkUnread");
+}
+
+#[test]
+fn test_download_attachment() {
+    let mut h = CliHarness::start();
+
+    let resp = h.send(json!({"command": "connect", "account": "test"}));
+    assert_eq!(resp["ok"], true, "connect failed: {}", resp);
+
+    // Verify email-001 has an attachment
+    let resp = h.send(json!({"command": "get_email", "id": "email-001"}));
+    assert_eq!(resp["ok"], true, "get_email failed: {}", resp);
+    let attachments = resp["attachments"].as_array().expect("attachments array");
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0]["name"], "test-document.pdf");
+    assert_eq!(attachments[0]["blob_id"], "blob-att-001");
+
+    // Download the attachment
+    let resp = h.send(json!({
+        "command": "download_attachment",
+        "blob_id": "blob-att-001",
+        "name": "test-document.pdf",
+        "content_type": "application/pdf"
+    }));
+    assert_eq!(resp["ok"], true, "download_attachment failed: {}", resp);
+    assert_eq!(resp["name"], "test-document.pdf");
+
+    let path_str = resp["path"].as_str().expect("path string");
+    let path = Path::new(path_str);
+    assert!(path.exists(), "downloaded file should exist at {}", path_str);
+
+    let contents = std::fs::read_to_string(path).expect("read downloaded file");
+    assert!(
+        contents.contains("blob-att-001"),
+        "file should contain expected content"
+    );
+
+    // Clean up
+    let _ = std::fs::remove_file(path);
 }

@@ -17,6 +17,7 @@ struct EmailRecord {
     received_at: String,
     mailbox_id: String,
     is_read: bool,
+    attachments: Vec<Value>,
 }
 
 impl EmailRecord {
@@ -43,7 +44,7 @@ impl EmailRecord {
             "mailboxIds": {self.mailbox_id.clone(): true},
             "messageId": [format!("<{}@example.com>", self.id)],
             "references": null,
-            "attachments": []
+            "attachments": self.attachments.clone()
         })
     }
 }
@@ -67,6 +68,13 @@ impl MockState {
                 received_at: "2025-01-15T10:30:00Z".to_string(),
                 mailbox_id: "mbox-inbox".to_string(),
                 is_read: true,
+                attachments: vec![json!({
+                    "partId": "2",
+                    "blobId": "blob-att-001",
+                    "type": "application/pdf",
+                    "name": "test-document.pdf",
+                    "size": 1024
+                })],
             },
             EmailRecord {
                 id: "email-002".to_string(),
@@ -78,6 +86,7 @@ impl MockState {
                 received_at: "2025-12-06T11:00:00Z".to_string(),
                 mailbox_id: "mbox-inbox".to_string(),
                 is_read: false,
+                attachments: vec![],
             },
             EmailRecord {
                 id: "email-003".to_string(),
@@ -89,6 +98,7 @@ impl MockState {
                 received_at: "2025-12-20T09:00:00Z".to_string(),
                 mailbox_id: "mbox-inbox".to_string(),
                 is_read: false,
+                attachments: vec![],
             },
             EmailRecord {
                 id: "email-004".to_string(),
@@ -100,6 +110,7 @@ impl MockState {
                 received_at: "2025-12-22T08:00:00Z".to_string(),
                 mailbox_id: "mbox-inbox".to_string(),
                 is_read: true,
+                attachments: vec![],
             },
             EmailRecord {
                 id: "email-005".to_string(),
@@ -111,6 +122,7 @@ impl MockState {
                 received_at: "2025-11-01T08:00:00Z".to_string(),
                 mailbox_id: "mbox-archive".to_string(),
                 is_read: true,
+                attachments: vec![],
             },
         ];
 
@@ -367,25 +379,53 @@ impl MockJmapServer {
         let method = parts[0];
         let path = parts[1];
 
-        let (status, response_body) = if method == "GET" && path.contains("/.well-known/jmap") {
-            Self::handle_session(port)
+        let (status, response_body, content_type) = if method == "GET"
+            && path.contains("/.well-known/jmap")
+        {
+            let (s, b) = Self::handle_session(port);
+            (s, b, "application/json")
         } else if method == "POST" && path.contains("/api") {
-            Self::handle_api(&body, state)
+            let (s, b) = Self::handle_api(&body, state);
+            (s, b, "application/json")
+        } else if method == "GET" && path.starts_with("/download/") {
+            let (s, b) = Self::handle_download(path);
+            (s, b, "application/octet-stream")
         } else {
             (
                 "404 Not Found".to_string(),
                 json!({"error": "not found"}).to_string(),
+                "application/json",
             )
         };
 
         let response = format!(
-            "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             status,
+            content_type,
             response_body.len(),
             response_body
         );
         let _ = stream.write_all(response.as_bytes());
         let _ = stream.flush();
+    }
+
+    fn handle_download(path: &str) -> (String, String) {
+        // Path format: /download/{accountId}/{blobId}/{name}?type={type}
+        let path_no_query = path.split('?').next().unwrap_or(path);
+        let segments: Vec<&str> = path_no_query.split('/').collect();
+        // segments: ["", "download", accountId, blobId, name]
+        if segments.len() >= 5 && segments[3] == "blob-att-001" {
+            let fake_pdf_content = b"%PDF-1.4 fake test content for blob-att-001";
+            (
+                "200 OK".to_string(),
+                String::from_utf8_lossy(fake_pdf_content).to_string(),
+            )
+        } else {
+            (
+                "404 Not Found".to_string(),
+                "blob not found".to_string(),
+            )
+        }
     }
 
     fn handle_session(port: u16) -> (String, String) {
