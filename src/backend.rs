@@ -303,13 +303,19 @@ fn backend_loop(
                     origin
                 );
 
-                // Serve cached mailboxes instantly
-                if let Some(ref cache) = cache {
-                    if let Some(cached_mboxes) = cache.get_mailboxes() {
-                        if !cached_mboxes.is_empty() {
-                            log_info!("[Backend] Serving {} cached mailboxes", cached_mboxes.len());
-                            cached_mailboxes = cached_mboxes.clone();
-                            let _ = resp_tx.send(BackendResponse::Mailboxes(Ok(cached_mboxes)));
+                // For TUI, serve cached mailboxes instantly then follow with live data.
+                // CLI expects one response per command, so skip the cached pre-response there.
+                if !origin.starts_with("cli") {
+                    if let Some(ref cache) = cache {
+                        if let Some(cached_mboxes) = cache.get_mailboxes() {
+                            if !cached_mboxes.is_empty() {
+                                log_info!(
+                                    "[Backend] Serving {} cached mailboxes",
+                                    cached_mboxes.len()
+                                );
+                                cached_mailboxes = cached_mboxes.clone();
+                                let _ = resp_tx.send(BackendResponse::Mailboxes(Ok(cached_mboxes)));
+                            }
                         }
                     }
                 }
