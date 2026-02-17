@@ -2,6 +2,17 @@ use base64::Engine;
 use serde_json::json;
 use std::io::Read as _;
 
+/// Read a ureq response body into a String without the default 10 MB size
+/// limit imposed by `Response::into_string()`.  Large JMAP responses (e.g.
+/// Email/get for 100 messages with full body values) can easily exceed that
+/// limit.
+fn read_response_body(resp: ureq::Response) -> Result<String, std::io::Error> {
+    let mut buf = String::new();
+    resp.into_reader().read_to_string(&mut buf)?;
+    buf.shrink_to_fit();
+    Ok(buf)
+}
+
 use super::types::*;
 
 pub struct JmapClient {
@@ -69,8 +80,7 @@ impl JmapClient {
                         }
                     }
 
-                    let body = resp
-                        .into_string()
+                    let body = read_response_body(resp)
                         .map_err(|e| JmapError::Parse(format!("Failed to read response: {}", e)))?;
 
                     if body.is_empty() {
@@ -95,7 +105,7 @@ impl JmapClient {
                     }
                 }
                 Err(ureq::Error::Status(code, resp)) => {
-                    let body = resp.into_string().unwrap_or_default();
+                    let body = read_response_body(resp).unwrap_or_default();
                     log_error!("[JMAP] HTTP error {}: {}", code, body);
 
                     if code == 401 {
@@ -213,8 +223,7 @@ impl JmapClient {
                 JmapError::Http(e.to_string())
             })?;
 
-        let response_text = response
-            .into_string()
+        let response_text = read_response_body(response)
             .map_err(|e| JmapError::Parse(format!("Failed to read response: {}", e)))?;
 
         log_debug!(

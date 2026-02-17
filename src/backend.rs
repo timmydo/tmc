@@ -857,7 +857,7 @@ fn backend_loop(
     }
 }
 
-const EMAIL_GET_CHUNK_SIZE: usize = 100;
+const EMAIL_GET_CHUNK_SIZE: usize = 50;
 
 fn fetch_emails_chunked(
     client: &JmapClient,
