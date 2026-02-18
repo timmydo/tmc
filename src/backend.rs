@@ -1092,7 +1092,7 @@ fn backend_loop(
                     std::fs::create_dir_all(&dir)
                         .map_err(|e| format!("Failed to create download dir: {}", e))?;
 
-                    let safe_name = name.replace('/', "_").replace('\\', "_").replace('\0', "_");
+                    let safe_name = name.replace(['/', '\\', '\0'], "_");
                     let path = dir.join(&safe_name);
                     std::fs::write(&path, &bytes)
                         .map_err(|e| format!("Failed to write file: {}", e))?;

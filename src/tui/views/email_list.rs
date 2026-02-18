@@ -64,6 +64,7 @@ pub struct EmailListView {
 }
 
 impl EmailListView {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cmd_tx: mpsc::Sender<BackendCommand>,
         reply_from_address: String,

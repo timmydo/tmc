@@ -218,6 +218,7 @@ impl EmailView {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_thread(
         cmd_tx: mpsc::Sender<BackendCommand>,
         reply_from_address: String,

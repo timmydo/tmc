@@ -280,7 +280,7 @@ pub fn write_temp_file(content: &str) -> io::Result<PathBuf> {
 
     let mut file = fs::OpenOptions::new()
         .write(true)
-        .create(true)
+        .truncate(true)
         .create_new(true)
         .mode(0o600)
         .open(&path)?;
