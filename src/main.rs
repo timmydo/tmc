@@ -271,6 +271,7 @@ fn main() {
         eprintln!("  --clear-cache    Delete all local email cache files");
         eprintln!("  --clear-log      Truncate the log file at startup");
         eprintln!("  --log            View the log file in $PAGER");
+        eprintln!("  --offline        Browse cached mail without network access");
         eprintln!("  --print-rules    Parse and print rules.toml");
         eprintln!("  --prompt=TOPIC   Print an AI-friendly prompt (config, rules)");
         eprintln!("  --cli            Run in JSON-over-stdin/stdout CLI mode");
@@ -373,6 +374,8 @@ fn main() {
         (Vec::new(), Vec::new())
     };
 
+    let offline = args.iter().any(|a| a == "--offline");
+
     if args.iter().any(|a| a == "--cli") {
         let archive_folder = config.mail.archive_folder.clone();
         let deleted_folder = config.mail.deleted_folder.clone();
@@ -390,28 +393,34 @@ fn main() {
             deleted_folder,
             archive_mailbox_id,
             deleted_mailbox_id,
+            offline,
         );
         std::process::exit(0);
     }
 
     let first_account = &config.accounts[0];
 
-    // Connect to the first account
-    eprint!(
-        "Connecting to {} ({})...",
-        first_account.name, first_account.well_known_url
-    );
-    io::stderr().flush().ok();
+    let client = if offline {
+        eprintln!("Offline mode ({})", first_account.name);
+        None
+    } else {
+        // Connect to the first account
+        eprint!(
+            "Connecting to {} ({})...",
+            first_account.name, first_account.well_known_url
+        );
+        io::stderr().flush().ok();
 
-    let client = match connect_account(first_account) {
-        Ok(client) => {
-            eprintln!(" OK");
-            client
-        }
-        Err(e) => {
-            eprintln!(" FAILED");
-            eprintln!("{}", e);
-            std::process::exit(1);
+        match connect_account(first_account) {
+            Ok(client) => {
+                eprintln!(" OK");
+                Some(client)
+            }
+            Err(e) => {
+                eprintln!(" FAILED");
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
         }
     };
 
@@ -436,6 +445,7 @@ fn main() {
         compiled_rules,
         custom_headers,
         config.theme,
+        offline,
     ) {
         eprintln!("TUI error: {}", e);
         std::process::exit(1);

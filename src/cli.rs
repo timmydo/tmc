@@ -51,6 +51,7 @@ struct CliState {
     deleted_mailbox_id: Option<String>,
     next_plan_id: u64,
     triage_plans: HashMap<String, TriagePlan>,
+    offline: bool,
 }
 
 impl CliState {
@@ -308,9 +309,13 @@ fn cmd_connect(state: &mut CliState, input: &Value) -> Value {
     state.connected_username = None;
     state.cached_mailboxes.clear();
 
-    let client = match crate::connect_account(&account) {
-        Ok(c) => c,
-        Err(e) => return err_response(&format!("connection failed: {}", e)),
+    let client = if state.offline {
+        None
+    } else {
+        match crate::connect_account(&account) {
+            Ok(c) => Some(c),
+            Err(e) => return err_response(&format!("connection failed: {}", e)),
+        }
     };
 
     let (cmd_tx, resp_rx) = backend::spawn(
@@ -330,6 +335,7 @@ fn cmd_connect(state: &mut CliState, input: &Value) -> Value {
     ok_response(json!({
         "account": account.name,
         "username": account.username,
+        "offline": state.offline,
     }))
 }
 
@@ -1376,6 +1382,7 @@ pub fn run_cli(
     deleted_folder: String,
     archive_mailbox_id: Option<String>,
     deleted_mailbox_id: Option<String>,
+    offline: bool,
 ) {
     let rules_regex = Regex::new(&rules_mailbox_regex).expect("invalid rules_mailbox_regex");
     let email_regex = Regex::new(&my_email_regex).expect("invalid my_email_regex");
@@ -1398,6 +1405,7 @@ pub fn run_cli(
         deleted_mailbox_id,
         next_plan_id: 0,
         triage_plans: HashMap::new(),
+        offline,
     };
 
     let stdin = io::stdin();

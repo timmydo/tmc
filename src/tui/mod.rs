@@ -22,7 +22,7 @@ fn sync_mouse_for_view(term: &mut Terminal, stack: &ViewStack) -> io::Result<()>
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
-    client: JmapClient,
+    client: Option<JmapClient>,
     accounts: Vec<AccountConfig>,
     current_account_idx: usize,
     initial_account_name: String,
@@ -39,6 +39,7 @@ pub fn run(
     rules: Vec<CompiledRule>,
     custom_headers: Vec<String>,
     theme: Theme,
+    offline: bool,
 ) -> io::Result<()> {
     let rules = std::sync::Arc::new(rules);
     let custom_headers = std::sync::Arc::new(custom_headers);
@@ -191,11 +192,19 @@ pub fn run(
                         // Shut down old backend
                         let _ = cmd_tx.send(BackendCommand::Shutdown);
 
-                        // Connect to new account
-                        match crate::connect_account(account) {
-                            Ok(new_client) => {
+                        let new_client = if offline {
+                            Ok(None)
+                        } else {
+                            match crate::connect_account(account) {
+                                Ok(c) => Ok(Some(c)),
+                                Err(e) => Err(e),
+                            }
+                        };
+
+                        match new_client {
+                            Ok(client) => {
                                 let (new_cmd_tx, new_resp_rx) = backend::spawn(
-                                    new_client,
+                                    client,
                                     account.name.clone(),
                                     rules.clone(),
                                     custom_headers.clone(),

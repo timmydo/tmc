@@ -1108,7 +1108,8 @@ impl View for EmailView {
                     Ok(email) => {
                         self.email = Some(email.clone());
                         if is_forward {
-                            let draft = compose::build_forward_draft(email, &self.reply_from_address);
+                            let draft =
+                                compose::build_forward_draft(email, &self.reply_from_address);
                             self.pending_compose = Some(draft);
                         } else if let Some(reply_all) = reply_all {
                             let draft = compose::build_reply_draft(

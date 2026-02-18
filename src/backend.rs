@@ -236,7 +236,7 @@ pub enum EmailMutationAction {
 
 /// Spawn the backend thread. Returns the command sender and response receiver.
 pub fn spawn(
-    client: JmapClient,
+    client: Option<JmapClient>,
     account_name: String,
     rules: Arc<Vec<CompiledRule>>,
     custom_headers: Arc<Vec<String>>,
@@ -279,9 +279,281 @@ pub fn spawn(
     (cmd_tx, resp_rx)
 }
 
+/// Handle a command in offline mode. Returns true to continue, false to break (shutdown).
+fn handle_offline_command(
+    cmd: &BackendCommand,
+    resp_tx: &mpsc::Sender<BackendResponse>,
+    cache: &Option<Cache>,
+    cached_mailboxes: &mut Vec<Mailbox>,
+    command_seq: u64,
+) -> bool {
+    match cmd {
+        BackendCommand::FetchMailboxes { origin } => {
+            log_info!(
+                "[Backend/offline] cmd#{} FetchMailboxes origin='{}'",
+                command_seq,
+                origin
+            );
+            let result = if let Some(ref cache) = cache {
+                if let Some(mboxes) = cache.get_mailboxes() {
+                    if !mboxes.is_empty() {
+                        *cached_mailboxes = mboxes.clone();
+                        Ok(mboxes)
+                    } else {
+                        Err("no cached mailboxes available (offline mode)".to_string())
+                    }
+                } else {
+                    Err("no cached mailboxes available (offline mode)".to_string())
+                }
+            } else {
+                Err("cache unavailable (offline mode)".to_string())
+            };
+            let _ = resp_tx.send(BackendResponse::Mailboxes(result));
+        }
+        BackendCommand::QueryEmails {
+            origin,
+            mailbox_id,
+            position,
+            search_query,
+            received_after,
+            received_before,
+            ..
+        } => {
+            log_info!(
+                "[Backend/offline] cmd#{} QueryEmails origin='{}' mailbox_id='{}'",
+                command_seq,
+                origin,
+                mailbox_id
+            );
+            // Only serve first page, no search/date filters
+            if *position != 0
+                || search_query.is_some()
+                || received_after.is_some()
+                || received_before.is_some()
+            {
+                let _ = resp_tx.send(BackendResponse::Emails {
+                    mailbox_id: mailbox_id.clone(),
+                    emails: Err("search and pagination not available in offline mode".to_string()),
+                    total: None,
+                    position: *position,
+                    loaded: 0,
+                    thread_counts: HashMap::new(),
+                });
+            } else if let Some(ref cache) = cache {
+                if let Some(cached_emails) = cache.get_mailbox_emails(mailbox_id) {
+                    let loaded = cached_emails.len() as u32;
+                    let _ = resp_tx.send(BackendResponse::Emails {
+                        mailbox_id: mailbox_id.clone(),
+                        emails: Ok(cached_emails),
+                        total: None,
+                        position: 0,
+                        loaded,
+                        thread_counts: HashMap::new(),
+                    });
+                } else {
+                    let _ = resp_tx.send(BackendResponse::Emails {
+                        mailbox_id: mailbox_id.clone(),
+                        emails: Ok(Vec::new()),
+                        total: Some(0),
+                        position: 0,
+                        loaded: 0,
+                        thread_counts: HashMap::new(),
+                    });
+                }
+            } else {
+                let _ = resp_tx.send(BackendResponse::Emails {
+                    mailbox_id: mailbox_id.clone(),
+                    emails: Err("cache unavailable (offline mode)".to_string()),
+                    total: None,
+                    position: 0,
+                    loaded: 0,
+                    thread_counts: HashMap::new(),
+                });
+            }
+        }
+        BackendCommand::GetEmail { id } => {
+            let result = if let Some(ref cache) = cache {
+                if let Some(email) = cache.get_email(id) {
+                    log_debug!("[Backend/offline] Cache hit for email {}", id);
+                    Ok(email)
+                } else {
+                    Err("email not cached (offline mode)".to_string())
+                }
+            } else {
+                Err("cache unavailable (offline mode)".to_string())
+            };
+            let _ = resp_tx.send(BackendResponse::EmailBody {
+                id: id.clone(),
+                result: Box::new(result),
+            });
+        }
+        BackendCommand::GetEmailForReply { id } => {
+            let result = if let Some(ref cache) = cache {
+                if let Some(email) = cache.get_email(id) {
+                    Ok(email)
+                } else {
+                    Err("email not cached (offline mode)".to_string())
+                }
+            } else {
+                Err("cache unavailable (offline mode)".to_string())
+            };
+            let _ = resp_tx.send(BackendResponse::EmailForReply {
+                id: id.clone(),
+                result: Box::new(result),
+            });
+        }
+        BackendCommand::Shutdown => {
+            return false;
+        }
+        // All mutations and network-only commands
+        BackendCommand::MarkEmailRead { op_id, id, .. } => {
+            let _ = resp_tx.send(BackendResponse::EmailMutation {
+                op_id: *op_id,
+                id: id.clone(),
+                action: EmailMutationAction::MarkRead,
+                result: Err("not available in offline mode".to_string()),
+            });
+        }
+        BackendCommand::MarkEmailUnread { op_id, id, .. } => {
+            let _ = resp_tx.send(BackendResponse::EmailMutation {
+                op_id: *op_id,
+                id: id.clone(),
+                action: EmailMutationAction::MarkUnread,
+                result: Err("not available in offline mode".to_string()),
+            });
+        }
+        BackendCommand::SetEmailFlagged {
+            op_id, id, flagged, ..
+        } => {
+            let _ = resp_tx.send(BackendResponse::EmailMutation {
+                op_id: *op_id,
+                id: id.clone(),
+                action: EmailMutationAction::SetFlagged(*flagged),
+                result: Err("not available in offline mode".to_string()),
+            });
+        }
+        BackendCommand::MoveEmail { op_id, id, .. } => {
+            let _ = resp_tx.send(BackendResponse::EmailMutation {
+                op_id: *op_id,
+                id: id.clone(),
+                action: EmailMutationAction::Move,
+                result: Err("not available in offline mode".to_string()),
+            });
+        }
+        BackendCommand::MoveThread {
+            op_id, thread_id, ..
+        } => {
+            let _ = resp_tx.send(BackendResponse::EmailMutation {
+                op_id: *op_id,
+                id: thread_id.clone(),
+                action: EmailMutationAction::Move,
+                result: Err("not available in offline mode".to_string()),
+            });
+        }
+        BackendCommand::DestroyEmail { op_id, id, .. } => {
+            let _ = resp_tx.send(BackendResponse::EmailMutation {
+                op_id: *op_id,
+                id: id.clone(),
+                action: EmailMutationAction::Destroy,
+                result: Err("not available in offline mode".to_string()),
+            });
+        }
+        BackendCommand::DestroyThread {
+            op_id, thread_id, ..
+        } => {
+            let _ = resp_tx.send(BackendResponse::EmailMutation {
+                op_id: *op_id,
+                id: thread_id.clone(),
+                action: EmailMutationAction::Destroy,
+                result: Err("not available in offline mode".to_string()),
+            });
+        }
+        BackendCommand::CreateMailbox { name } => {
+            let _ = resp_tx.send(BackendResponse::MailboxCreated {
+                name: name.clone(),
+                result: Err("not available in offline mode".to_string()),
+            });
+        }
+        BackendCommand::DeleteMailbox { name, .. } => {
+            let _ = resp_tx.send(BackendResponse::MailboxDeleted {
+                name: name.clone(),
+                result: Err("not available in offline mode".to_string()),
+            });
+        }
+        BackendCommand::QueryThreadEmails { thread_id } => {
+            let _ = resp_tx.send(BackendResponse::ThreadEmails {
+                thread_id: thread_id.clone(),
+                emails: Err("not available in offline mode".to_string()),
+            });
+        }
+        BackendCommand::MarkThreadRead { thread_id, .. } => {
+            let _ = resp_tx.send(BackendResponse::ThreadMarkedRead {
+                thread_id: thread_id.clone(),
+                result: Err("not available in offline mode".to_string()),
+            });
+        }
+        BackendCommand::MarkMailboxRead {
+            mailbox_id,
+            mailbox_name,
+        } => {
+            let _ = resp_tx.send(BackendResponse::MailboxMarkedRead {
+                mailbox_id: mailbox_id.clone(),
+                mailbox_name: mailbox_name.clone(),
+                updated: 0,
+                result: Err("not available in offline mode".to_string()),
+            });
+        }
+        BackendCommand::GetEmailRawHeaders { id } => {
+            let _ = resp_tx.send(BackendResponse::EmailRawHeaders {
+                id: id.clone(),
+                result: Err("not available in offline mode".to_string()),
+            });
+        }
+        BackendCommand::DownloadAttachment { name, .. } => {
+            let _ = resp_tx.send(BackendResponse::AttachmentDownloaded {
+                name: name.clone(),
+                result: Err("not available in offline mode".to_string()),
+            });
+        }
+        BackendCommand::PreviewRetentionExpiry { .. } => {
+            let _ = resp_tx.send(BackendResponse::RetentionPreview {
+                result: Err("not available in offline mode".to_string()),
+            });
+        }
+        BackendCommand::ExecuteRetentionExpiry { .. } => {
+            let _ = resp_tx.send(BackendResponse::RetentionExecuted {
+                result: Err("not available in offline mode".to_string()),
+            });
+        }
+        BackendCommand::PreviewRulesForMailbox {
+            mailbox_id,
+            mailbox_name,
+            ..
+        } => {
+            let _ = resp_tx.send(BackendResponse::RulesDryRun {
+                mailbox_id: mailbox_id.clone(),
+                mailbox_name: mailbox_name.clone(),
+                result: Err("not available in offline mode".to_string()),
+            });
+        }
+        BackendCommand::RunRulesForMailbox {
+            mailbox_id,
+            mailbox_name,
+            ..
+        } => {
+            let _ = resp_tx.send(BackendResponse::RulesRun {
+                mailbox_id: mailbox_id.clone(),
+                mailbox_name: mailbox_name.clone(),
+                result: Err("not available in offline mode".to_string()),
+            });
+        }
+    }
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
 fn backend_loop(
-    client: JmapClient,
+    client: Option<JmapClient>,
     cmd_rx: mpsc::Receiver<BackendCommand>,
     resp_tx: mpsc::Sender<BackendResponse>,
     rules: Arc<Vec<CompiledRule>>,
@@ -292,9 +564,21 @@ fn backend_loop(
 ) {
     let mut cached_mailboxes: Vec<Mailbox> = Vec::new();
     let mut command_seq: u64 = 0;
+    let offline = client.is_none();
 
     while let Ok(cmd) = cmd_rx.recv() {
         command_seq = command_seq.wrapping_add(1);
+
+        if offline {
+            if handle_offline_command(&cmd, &resp_tx, &cache, &mut cached_mailboxes, command_seq) {
+                continue;
+            } else {
+                break; // Shutdown
+            }
+        }
+
+        let client = client.as_ref().unwrap();
+
         match cmd {
             BackendCommand::FetchMailboxes { origin } => {
                 log_info!(
@@ -413,7 +697,7 @@ fn backend_loop(
                     let mut emails = if query.ids.is_empty() {
                         Ok(Vec::new())
                     } else {
-                        fetch_emails_chunked(&client, &query.ids, &custom_headers)
+                        fetch_emails_chunked(client, &query.ids, &custom_headers)
                     }?;
 
                     // Cache fetched emails
@@ -477,7 +761,7 @@ fn backend_loop(
                                     let removed_ids = rules::execute_rule_actions(
                                         &applications,
                                         &cached_mailboxes,
-                                        &client,
+                                        client,
                                     );
                                     if !removed_ids.is_empty() {
                                         log_info!(
@@ -750,7 +1034,7 @@ fn backend_loop(
                     mailbox_name,
                     mailbox_id
                 );
-                let ids_result = fetch_all_mailbox_email_ids(&client, &mailbox_id);
+                let ids_result = fetch_all_mailbox_email_ids(client, &mailbox_id);
                 let (updated, result) = match ids_result {
                     Ok(ids) => {
                         let updated = ids.len();
@@ -824,12 +1108,12 @@ fn backend_loop(
                 let _ = resp_tx.send(BackendResponse::AttachmentDownloaded { name, result });
             }
             BackendCommand::PreviewRetentionExpiry { policies } => {
-                let result = collect_retention_candidates(&client, &cached_mailboxes, &policies)
+                let result = collect_retention_candidates(client, &cached_mailboxes, &policies)
                     .map(|candidates| RetentionPreviewResult { candidates });
                 let _ = resp_tx.send(BackendResponse::RetentionPreview { result });
             }
             BackendCommand::ExecuteRetentionExpiry { policies } => {
-                let result = execute_retention_expiry(&client, &cached_mailboxes, &policies);
+                let result = execute_retention_expiry(client, &cached_mailboxes, &policies);
                 let _ = resp_tx.send(BackendResponse::RetentionExecuted { result });
             }
             BackendCommand::PreviewRulesForMailbox {
@@ -844,7 +1128,7 @@ fn backend_loop(
                     mailbox_name
                 );
                 let result = preview_rules_for_mailbox(
-                    &client,
+                    client,
                     &cached_mailboxes,
                     &rules,
                     &custom_headers,
@@ -869,7 +1153,7 @@ fn backend_loop(
                     mailbox_name
                 );
                 let result = run_rules_for_mailbox(
-                    &client,
+                    client,
                     &cached_mailboxes,
                     &rules,
                     &custom_headers,
