@@ -435,6 +435,7 @@ fn main() {
         config.mail.retention_policies,
         compiled_rules,
         custom_headers,
+        config.theme,
     ) {
         eprintln!("TUI error: {}", e);
         std::process::exit(1);

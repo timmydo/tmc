@@ -4,7 +4,7 @@ pub mod views;
 
 use crate::backend::{self, BackendCommand};
 use crate::compose;
-use crate::config::{AccountConfig, RetentionPolicyConfig};
+use crate::config::{AccountConfig, RetentionPolicyConfig, Theme};
 use crate::jmap::client::JmapClient;
 use crate::rules::CompiledRule;
 use input::read_key;
@@ -38,6 +38,7 @@ pub fn run(
     retention_policies: Vec<RetentionPolicyConfig>,
     rules: Vec<CompiledRule>,
     custom_headers: Vec<String>,
+    theme: Theme,
 ) -> io::Result<()> {
     let rules = std::sync::Arc::new(rules);
     let custom_headers = std::sync::Arc::new(custom_headers);
@@ -65,7 +66,7 @@ pub fn run(
         rules_mailbox_regex.clone(),
         my_email_regex.clone(),
     );
-    let mut term = Terminal::new(mouse)?;
+    let mut term = Terminal::new(mouse, theme)?;
 
     let account_names: Vec<String> = accounts.iter().map(|a| a.name.clone()).collect();
     let mut current_idx = current_account_idx;

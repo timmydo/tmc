@@ -127,7 +127,7 @@ impl View for HelpView {
                 && !line.starts_with('=');
 
             if is_header {
-                term.set_bold()?;
+                term.set_header()?;
                 term.write_truncated(line, term.cols)?;
                 term.reset_attr()?;
             } else {
@@ -137,7 +137,7 @@ impl View for HelpView {
 
         // Status bar
         term.move_to(term.rows, 1)?;
-        term.set_reverse()?;
+        term.set_status()?;
         let status = format!(
             " Help | line {}/{} | q:close n/j:down p/k:up",
             self.scroll + 1,

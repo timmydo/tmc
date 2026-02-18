@@ -132,7 +132,7 @@ impl View for MailboxListView {
 
         // Header
         term.move_to(1, 1)?;
-        term.set_bold()?;
+        term.set_header()?;
         let header = {
             let title = if self.account_names.len() > 1 {
                 format!("tmc - {}", self.current_account)
@@ -155,7 +155,7 @@ impl View for MailboxListView {
 
         if self.create_mode {
             term.move_to(3, 1)?;
-            term.set_bold()?;
+            term.set_header()?;
             term.write_truncated("Create new folder:", term.cols)?;
             term.reset_attr()?;
             term.move_to(4, 1)?;
@@ -163,7 +163,7 @@ impl View for MailboxListView {
             term.write_truncated(&input, term.cols)?;
         } else if self.delete_confirm_mode {
             term.move_to(3, 1)?;
-            term.set_bold()?;
+            term.set_header()?;
             let name = self
                 .mailboxes
                 .get(self.cursor)
@@ -205,12 +205,12 @@ impl View for MailboxListView {
                 let line = Self::format_mailbox(mailbox);
 
                 if display_idx == self.cursor {
-                    term.set_reverse()?;
+                    term.set_selection()?;
                     if mailbox.unread_emails > 0 {
-                        term.set_bold()?;
+                        term.set_bold_text()?;
                     }
                 } else if mailbox.unread_emails > 0 {
-                    term.set_bold()?;
+                    term.set_bold_text()?;
                 }
 
                 term.write_truncated(&line, term.cols)?;
@@ -220,7 +220,7 @@ impl View for MailboxListView {
 
         // Status bar
         term.move_to(term.rows, 1)?;
-        term.set_reverse()?;
+        term.set_status()?;
         let account_hint = if self.account_names.len() > 1 {
             " a:account"
         } else {

@@ -49,7 +49,7 @@ impl View for RetentionPreviewView {
             let row = 1 + i as u16;
             term.move_to(row, 1)?;
             if i == 0 && self.scroll == 0 {
-                term.set_bold()?;
+                term.set_header()?;
                 term.write_truncated(line, term.cols)?;
                 term.reset_attr()?;
             } else {
@@ -58,7 +58,7 @@ impl View for RetentionPreviewView {
         }
 
         term.move_to(term.rows, 1)?;
-        term.set_reverse()?;
+        term.set_status()?;
         let status = format!(
             " Preview | line {}/{} | q/Esc/Enter:close n/p:scroll",
             self.scroll + 1,

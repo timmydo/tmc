@@ -12,11 +12,51 @@ pub struct AccountConfig {
     pub password_command: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct Theme {
+    pub bg: Option<(u8, u8, u8)>,
+    pub fg: Option<(u8, u8, u8)>,
+    pub bold_fg: Option<(u8, u8, u8)>,
+    pub selection_bg: Option<(u8, u8, u8)>,
+    pub selection_fg: Option<(u8, u8, u8)>,
+    pub status_bg: Option<(u8, u8, u8)>,
+    pub status_fg: Option<(u8, u8, u8)>,
+    pub header_fg: Option<(u8, u8, u8)>,
+}
+
+fn parse_hex_color(s: &str, field: &str) -> Result<(u8, u8, u8), ConfigError> {
+    let s = s.trim();
+    if !s.starts_with('#') || s.len() != 7 {
+        return Err(ConfigError::Parse(format!(
+            "invalid color '{}' for theme.{}: expected #RRGGBB format",
+            s, field
+        )));
+    }
+    let r = u8::from_str_radix(&s[1..3], 16);
+    let g = u8::from_str_radix(&s[3..5], 16);
+    let b = u8::from_str_radix(&s[5..7], 16);
+    match (r, g, b) {
+        (Ok(r), Ok(g), Ok(b)) => Ok((r, g, b)),
+        _ => Err(ConfigError::Parse(format!(
+            "invalid hex digits in color '{}' for theme.{}",
+            s, field
+        ))),
+    }
+}
+
+fn resolve_color(value: &Option<String>, field: &str) -> Result<Option<(u8, u8, u8)>, ConfigError> {
+    match value {
+        Some(s) => Ok(Some(parse_hex_color(s, field)?)),
+        None => Ok(None),
+    }
+}
+
 #[derive(Debug)]
 pub struct Config {
     pub accounts: Vec<AccountConfig>,
     pub ui: UiConfig,
     pub mail: MailConfig,
+    pub theme: Theme,
 }
 
 #[derive(Debug)]
@@ -61,6 +101,27 @@ impl std::fmt::Display for ConfigError {
     }
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawThemeConfig {
+    #[serde(default)]
+    bg: Option<String>,
+    #[serde(default)]
+    fg: Option<String>,
+    #[serde(default)]
+    bold_fg: Option<String>,
+    #[serde(default)]
+    selection_bg: Option<String>,
+    #[serde(default)]
+    selection_fg: Option<String>,
+    #[serde(default)]
+    status_bg: Option<String>,
+    #[serde(default)]
+    status_fg: Option<String>,
+    #[serde(default)]
+    header_fg: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
@@ -74,6 +135,8 @@ struct RawConfig {
     account: BTreeMap<String, RawAccountFields>,
     #[serde(default)]
     retention: BTreeMap<String, RawRetentionPolicy>,
+    #[serde(default)]
+    theme: RawThemeConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -259,8 +322,20 @@ impl Config {
             });
         }
 
+        let theme = Theme {
+            bg: resolve_color(&raw.theme.bg, "bg")?,
+            fg: resolve_color(&raw.theme.fg, "fg")?,
+            bold_fg: resolve_color(&raw.theme.bold_fg, "bold_fg")?,
+            selection_bg: resolve_color(&raw.theme.selection_bg, "selection_bg")?,
+            selection_fg: resolve_color(&raw.theme.selection_fg, "selection_fg")?,
+            status_bg: resolve_color(&raw.theme.status_bg, "status_bg")?,
+            status_fg: resolve_color(&raw.theme.status_fg, "status_fg")?,
+            header_fg: resolve_color(&raw.theme.header_fg, "header_fg")?,
+        };
+
         Ok(Config {
             accounts,
+            theme,
             ui: UiConfig {
                 editor: raw.ui.editor,
                 page_size: raw.ui.page_size,
@@ -461,6 +536,79 @@ password_command = "pass show email/example.com"
             config.mail.deleted_mailbox_id.as_deref(),
             Some("mbox-trash")
         );
+    }
+
+    #[test]
+    fn test_theme_defaults_all_none() {
+        let config = Config::parse(&jmap_config("")).unwrap();
+        assert!(config.theme.bg.is_none());
+        assert!(config.theme.fg.is_none());
+        assert!(config.theme.bold_fg.is_none());
+        assert!(config.theme.selection_bg.is_none());
+        assert!(config.theme.selection_fg.is_none());
+        assert!(config.theme.status_bg.is_none());
+        assert!(config.theme.status_fg.is_none());
+        assert!(config.theme.header_fg.is_none());
+    }
+
+    #[test]
+    fn test_theme_parses_hex_colors() {
+        let config = Config::parse(&jmap_config(
+            r##"[theme]
+bg = "#002b36"
+fg = "#839496"
+bold_fg = "#93a1a1"
+selection_bg = "#073642"
+selection_fg = "#eee8d5"
+status_bg = "#586e75"
+status_fg = "#eee8d5"
+header_fg = "#268bd2"
+"##,
+        ))
+        .unwrap();
+        assert_eq!(config.theme.bg, Some((0x00, 0x2b, 0x36)));
+        assert_eq!(config.theme.fg, Some((0x83, 0x94, 0x96)));
+        assert_eq!(config.theme.bold_fg, Some((0x93, 0xa1, 0xa1)));
+        assert_eq!(config.theme.selection_bg, Some((0x07, 0x36, 0x42)));
+        assert_eq!(config.theme.selection_fg, Some((0xee, 0xe8, 0xd5)));
+        assert_eq!(config.theme.status_bg, Some((0x58, 0x6e, 0x75)));
+        assert_eq!(config.theme.status_fg, Some((0xee, 0xe8, 0xd5)));
+        assert_eq!(config.theme.header_fg, Some((0x26, 0x8b, 0xd2)));
+    }
+
+    #[test]
+    fn test_theme_partial_colors() {
+        let config = Config::parse(&jmap_config(
+            "[theme]\nbg = \"#002b36\"\nheader_fg = \"#268bd2\"",
+        ))
+        .unwrap();
+        assert_eq!(config.theme.bg, Some((0x00, 0x2b, 0x36)));
+        assert!(config.theme.fg.is_none());
+        assert_eq!(config.theme.header_fg, Some((0x26, 0x8b, 0xd2)));
+    }
+
+    #[test]
+    fn test_theme_invalid_hex_format() {
+        let err = Config::parse(&jmap_config("[theme]\nbg = \"red\"")).unwrap_err();
+        match err {
+            ConfigError::Parse(msg) => {
+                assert!(msg.contains("invalid color"), "got: {}", msg);
+                assert!(msg.contains("theme.bg"), "got: {}", msg);
+            }
+            _ => panic!("expected parse error"),
+        }
+    }
+
+    #[test]
+    fn test_theme_invalid_hex_digits() {
+        let err = Config::parse(&jmap_config("[theme]\nfg = \"#ZZZZZZ\"")).unwrap_err();
+        match err {
+            ConfigError::Parse(msg) => {
+                assert!(msg.contains("invalid hex digits"), "got: {}", msg);
+                assert!(msg.contains("theme.fg"), "got: {}", msg);
+            }
+            _ => panic!("expected parse error"),
+        }
     }
 
     #[test]

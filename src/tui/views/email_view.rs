@@ -629,7 +629,7 @@ impl View for EmailView {
             };
             term.write_truncated(load_msg, term.cols)?;
             term.move_to(term.rows, 1)?;
-            term.set_reverse()?;
+            term.set_status()?;
             term.write_truncated(" Loading... | q:back", term.cols)?;
             let remaining = (term.cols as usize).saturating_sub(20);
             for _ in 0..remaining {
@@ -643,7 +643,7 @@ impl View for EmailView {
             term.move_to(1, 1)?;
             term.write_truncated(err, term.cols)?;
             term.move_to(term.rows, 1)?;
-            term.set_reverse()?;
+            term.set_status()?;
             term.write_truncated(" q:back", term.cols)?;
             let remaining = (term.cols as usize).saturating_sub(7);
             for _ in 0..remaining {
@@ -655,7 +655,7 @@ impl View for EmailView {
 
         if self.move_mode {
             term.move_to(1, 1)?;
-            term.set_bold()?;
+            term.set_header()?;
             term.write_truncated("Move to mailbox:", term.cols)?;
             term.reset_attr()?;
 
@@ -680,7 +680,7 @@ impl View for EmailView {
                 let line = format!("  {}", mailbox.name);
 
                 if display_idx == self.move_cursor {
-                    term.set_reverse()?;
+                    term.set_selection()?;
                 }
 
                 term.write_truncated(&line, term.cols)?;
@@ -689,7 +689,7 @@ impl View for EmailView {
 
             // Status bar
             term.move_to(term.rows, 1)?;
-            term.set_reverse()?;
+            term.set_status()?;
             let status = format!(
                 " {}/{} | n/p:navigate RET:move Esc:cancel",
                 self.move_cursor + 1,
@@ -725,7 +725,7 @@ impl View for EmailView {
                 LineKind::Header => {
                     let row = 1 + row_idx as u16;
                     term.move_to(row, 1)?;
-                    term.set_bold()?;
+                    term.set_header()?;
                     term.write_truncated(line, term.cols)?;
                     term.reset_attr()?;
                     row_idx += 1;
@@ -733,8 +733,8 @@ impl View for EmailView {
                 LineKind::Separator => {
                     let row = 1 + row_idx as u16;
                     term.move_to(row, 1)?;
-                    // White background bar spanning entire width
-                    term.set_reverse()?;
+                    // Bar spanning entire width
+                    term.set_status()?;
                     let pad = " ".repeat(width);
                     term.write_str(&pad)?;
                     term.reset_attr()?;
@@ -762,7 +762,7 @@ impl View for EmailView {
 
         // Status bar
         term.move_to(term.rows, 1)?;
-        term.set_reverse()?;
+        term.set_status()?;
         let total_lines = self.lines.len();
         let base_status = if self.attachment_picking {
             format!(

@@ -558,7 +558,7 @@ impl View for EmailListView {
 
         // Header
         term.move_to(1, 1)?;
-        term.set_bold()?;
+        term.set_header()?;
         let header = {
             let base = if let Some(ref query) = self.active_search {
                 match self.total {
@@ -591,7 +591,7 @@ impl View for EmailListView {
         if self.move_mode {
             // Render mailbox picker
             term.move_to(3, 1)?;
-            term.set_bold()?;
+            term.set_header()?;
             term.write_truncated("Move to mailbox:", term.cols)?;
             term.reset_attr()?;
 
@@ -616,7 +616,7 @@ impl View for EmailListView {
                 let line = format!("  {}", mailbox.name);
 
                 if display_idx == self.move_cursor {
-                    term.set_reverse()?;
+                    term.set_selection()?;
                 }
 
                 term.write_truncated(&line, term.cols)?;
@@ -649,12 +649,12 @@ impl View for EmailListView {
                 let line = Self::format_email(email, term.cols, thread_counts);
 
                 if display_idx == self.cursor {
-                    term.set_reverse()?;
+                    term.set_selection()?;
                     if Self::is_unread(email) {
-                        term.set_bold()?;
+                        term.set_bold_text()?;
                     }
                 } else if Self::is_unread(email) {
-                    term.set_bold()?;
+                    term.set_bold_text()?;
                 }
 
                 term.write_truncated(&line, term.cols)?;
@@ -664,7 +664,7 @@ impl View for EmailListView {
 
         // Status bar
         term.move_to(term.rows, 1)?;
-        term.set_reverse()?;
+        term.set_status()?;
         let base_status = if self.search_mode {
             format!(" Search: {}_", self.search_input)
         } else if self.move_mode {

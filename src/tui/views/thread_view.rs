@@ -323,7 +323,7 @@ impl View for ThreadView {
 
         // Header
         term.move_to(1, 1)?;
-        term.set_bold()?;
+        term.set_header()?;
         let header = format!("Thread: {} ({} messages)", self.subject, self.emails.len());
         term.write_truncated(&header, term.cols)?;
         term.reset_attr()?;
@@ -359,12 +359,12 @@ impl View for ThreadView {
                 let line = Self::format_email(email, term.cols);
 
                 if display_idx == self.cursor {
-                    term.set_reverse()?;
+                    term.set_selection()?;
                     if Self::is_unread(email) {
-                        term.set_bold()?;
+                        term.set_bold_text()?;
                     }
                 } else if Self::is_unread(email) {
-                    term.set_bold()?;
+                    term.set_bold_text()?;
                 }
 
                 term.write_truncated(&line, term.cols)?;
@@ -374,7 +374,7 @@ impl View for ThreadView {
 
         // Status bar
         term.move_to(term.rows, 1)?;
-        term.set_reverse()?;
+        term.set_status()?;
         let base_status = if self.loading {
             " Loading... | q:back".to_string()
         } else if self.emails.is_empty() {

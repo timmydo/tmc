@@ -1,3 +1,4 @@
+use crate::config::Theme;
 use std::io::{self, BufWriter, Stdout, Write};
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,10 +16,12 @@ pub struct Terminal {
     pub cols: u16,
     mouse_supported: bool,
     mouse_enabled: bool,
+    theme: Theme,
+    in_selection: bool,
 }
 
 impl Terminal {
-    pub fn new(mouse: bool) -> io::Result<Self> {
+    pub fn new(mouse: bool, theme: Theme) -> io::Result<Self> {
         let stdin_fd = io::stdin().as_raw_fd();
 
         // Save original termios
@@ -54,6 +57,13 @@ impl Terminal {
         let mut out = BufWriter::new(io::stdout());
         // Enter alternate screen buffer, hide cursor
         write!(out, "\x1b[?1049h\x1b[?25l")?;
+        // Apply base theme colors to the entire screen
+        if let Some((r, g, b)) = theme.bg {
+            write!(out, "\x1b[48;2;{};{};{}m", r, g, b)?;
+        }
+        if let Some((r, g, b)) = theme.fg {
+            write!(out, "\x1b[38;2;{};{};{}m", r, g, b)?;
+        }
         if mouse {
             // Enable X10 mouse tracking + SGR extended coordinates
             write!(out, "\x1b[?1000h\x1b[?1006h")?;
@@ -67,6 +77,8 @@ impl Terminal {
             cols,
             mouse_supported: mouse,
             mouse_enabled: mouse,
+            theme,
+            in_selection: false,
         })
     }
 
@@ -117,12 +129,78 @@ impl Terminal {
         write!(self.out, "\x1b[7m")
     }
 
+    #[allow(dead_code)]
     pub fn set_bold(&mut self) -> io::Result<()> {
         write!(self.out, "\x1b[1m")
     }
 
     pub fn reset_attr(&mut self) -> io::Result<()> {
-        write!(self.out, "\x1b[0m")
+        write!(self.out, "\x1b[0m")?;
+        self.in_selection = false;
+        // Re-apply base theme colors so the theme persists after resets
+        if let Some((r, g, b)) = self.theme.bg {
+            write!(self.out, "\x1b[48;2;{};{};{}m", r, g, b)?;
+        }
+        if let Some((r, g, b)) = self.theme.fg {
+            write!(self.out, "\x1b[38;2;{};{};{}m", r, g, b)?;
+        }
+        Ok(())
+    }
+
+    /// Apply selection colors (for highlighted/cursor rows).
+    /// Falls back to reverse video if no theme colors are set.
+    pub fn set_selection(&mut self) -> io::Result<()> {
+        self.in_selection = true;
+        if self.theme.selection_bg.is_some() || self.theme.selection_fg.is_some() {
+            if let Some((r, g, b)) = self.theme.selection_bg {
+                write!(self.out, "\x1b[48;2;{};{};{}m", r, g, b)?;
+            }
+            if let Some((r, g, b)) = self.theme.selection_fg {
+                write!(self.out, "\x1b[38;2;{};{};{}m", r, g, b)?;
+            }
+            Ok(())
+        } else {
+            self.set_reverse()
+        }
+    }
+
+    /// Apply status bar colors.
+    /// Falls back to reverse video if no theme colors are set.
+    pub fn set_status(&mut self) -> io::Result<()> {
+        if self.theme.status_bg.is_some() || self.theme.status_fg.is_some() {
+            if let Some((r, g, b)) = self.theme.status_bg {
+                write!(self.out, "\x1b[48;2;{};{};{}m", r, g, b)?;
+            }
+            if let Some((r, g, b)) = self.theme.status_fg {
+                write!(self.out, "\x1b[38;2;{};{};{}m", r, g, b)?;
+            }
+            Ok(())
+        } else {
+            self.set_reverse()
+        }
+    }
+
+    /// Apply header colors (bold + header_fg if set).
+    pub fn set_header(&mut self) -> io::Result<()> {
+        write!(self.out, "\x1b[1m")?;
+        if let Some((r, g, b)) = self.theme.header_fg {
+            write!(self.out, "\x1b[38;2;{};{};{}m", r, g, b)?;
+        }
+        Ok(())
+    }
+
+    /// Apply bold text colors (for unread items).
+    /// Uses bold_fg if set, otherwise plain bold.
+    /// When inside a selection, only adds bold without changing fg,
+    /// so that selection_fg takes priority for contrast.
+    pub fn set_bold_text(&mut self) -> io::Result<()> {
+        write!(self.out, "\x1b[1m")?;
+        if !self.in_selection {
+            if let Some((r, g, b)) = self.theme.bold_fg {
+                write!(self.out, "\x1b[38;2;{};{};{}m", r, g, b)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn flush(&mut self) -> io::Result<()> {
@@ -151,8 +229,8 @@ impl Drop for Terminal {
             // Disable mouse tracking
             let _ = write!(self.out, "\x1b[?1000l\x1b[?1006l");
         }
-        // Show cursor, exit alternate screen
-        let _ = write!(self.out, "\x1b[?25h\x1b[?1049l");
+        // Reset all attributes (including custom fg/bg), show cursor, exit alternate screen
+        let _ = write!(self.out, "\x1b[0m\x1b[?25h\x1b[?1049l");
         let _ = self.out.flush();
 
         // Restore original terminal settings
