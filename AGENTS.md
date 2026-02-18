@@ -10,12 +10,15 @@ It follows a Unix model: compose/reply opens `$EDITOR`; tmc does not submit mail
 ## Build / Run / Test
 
 ```bash
-cargo build
-cargo run
-cargo test
-cargo clippy
+CC=gcc cargo build
+CC=gcc cargo run
+CC=gcc cargo test
+CC=gcc cargo clippy
 cargo fmt -- --check
 ```
+
+The `CC=gcc` prefix is required because the `ring` crate needs a C compiler
+and the system does not have `cc` on `$PATH` (Guix provides `gcc` instead).
 
 Runtime options:
 

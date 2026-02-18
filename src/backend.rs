@@ -504,7 +504,7 @@ fn backend_loop(
                         }
                     }
 
-                    // Build thread counts map (unread, total)
+                    // Build thread counts map (unread, total) scoped to current mailbox
                     let mut thread_counts = HashMap::new();
                     let thread_ids: Vec<String> =
                         emails.iter().filter_map(|e| e.thread_id.clone()).collect();
@@ -515,16 +515,31 @@ fn backend_loop(
                             let keyword_emails = client
                                 .get_email_keywords(&all_email_ids)
                                 .unwrap_or_default();
-                            let keyword_map: HashMap<String, bool> = keyword_emails
+                            let email_info: HashMap<String, (bool, bool)> = keyword_emails
                                 .iter()
-                                .map(|e| (e.id.clone(), e.keywords.contains_key("$seen")))
+                                .map(|e| {
+                                    let seen = e.keywords.contains_key("$seen");
+                                    let in_mailbox = e.mailbox_ids.contains_key(&mailbox_id);
+                                    (e.id.clone(), (seen, in_mailbox))
+                                })
                                 .collect();
                             for thread in threads {
-                                let total_count = thread.email_ids.len();
-                                let unread_count = thread
+                                let in_folder: Vec<&String> = thread
                                     .email_ids
                                     .iter()
-                                    .filter(|id| !keyword_map.get(*id).copied().unwrap_or(true))
+                                    .filter(|id| {
+                                        email_info
+                                            .get(*id)
+                                            .map(|(_, in_mb)| *in_mb)
+                                            .unwrap_or(false)
+                                    })
+                                    .collect();
+                                let total_count = in_folder.len();
+                                let unread_count = in_folder
+                                    .iter()
+                                    .filter(|id| {
+                                        !email_info.get(**id).map(|(seen, _)| *seen).unwrap_or(true)
+                                    })
                                     .count();
                                 thread_counts
                                     .insert(thread.id.clone(), (unread_count, total_count));

@@ -1032,7 +1032,7 @@ impl JmapClient {
                 json!({
                     "accountId": self.account_id,
                     "ids": ids,
-                    "properties": ["id", "keywords"]
+                    "properties": ["id", "keywords", "mailboxIds"]
                 }),
                 "0".to_string(),
             )],

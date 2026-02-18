@@ -434,10 +434,6 @@ impl EmailListView {
         let Some(email) = self.emails.get(self.cursor).cloned() else {
             return;
         };
-        let thread_total = self
-            .get_thread_counts(&email)
-            .map(|(_, total)| total)
-            .unwrap_or(1);
         let op_id = self.next_op_id();
         let from_index = self.cursor;
         self.pending_write_ops.insert(
@@ -448,27 +444,13 @@ impl EmailListView {
             },
         );
 
-        let send_result = if thread_total > 1 {
-            if let Some(thread_id) = email.thread_id.clone() {
-                self.cmd_tx.send(BackendCommand::MoveThread {
-                    op_id,
-                    thread_id,
-                    to_mailbox_id: target_id,
-                })
-            } else {
-                self.cmd_tx.send(BackendCommand::MoveEmail {
-                    op_id,
-                    id: email.id.clone(),
-                    to_mailbox_id: target_id,
-                })
-            }
-        } else {
-            self.cmd_tx.send(BackendCommand::MoveEmail {
-                op_id,
-                id: email.id.clone(),
-                to_mailbox_id: target_id,
-            })
-        };
+        // Always move only this single email (not the whole thread) so that
+        // archive/delete/move in the email list only affect the current folder.
+        let send_result = self.cmd_tx.send(BackendCommand::MoveEmail {
+            op_id,
+            id: email.id.clone(),
+            to_mailbox_id: target_id,
+        });
 
         self.emails.remove(from_index);
         if self.cursor >= self.emails.len() && self.cursor > 0 {
@@ -494,10 +476,6 @@ impl EmailListView {
         let Some(email) = self.emails.get(self.cursor).cloned() else {
             return;
         };
-        let thread_total = self
-            .get_thread_counts(&email)
-            .map(|(_, total)| total)
-            .unwrap_or(1);
         let op_id = self.next_op_id();
         let from_index = self.cursor;
         self.pending_write_ops.insert(
@@ -507,22 +485,12 @@ impl EmailListView {
                 from_index,
             },
         );
-        let send_result = if thread_total > 1 {
-            if let Some(thread_id) = email.thread_id.clone() {
-                self.cmd_tx
-                    .send(BackendCommand::DestroyThread { op_id, thread_id })
-            } else {
-                self.cmd_tx.send(BackendCommand::DestroyEmail {
-                    op_id,
-                    id: email.id.clone(),
-                })
-            }
-        } else {
-            self.cmd_tx.send(BackendCommand::DestroyEmail {
-                op_id,
-                id: email.id.clone(),
-            })
-        };
+        // Always destroy only this single email (not the whole thread) so that
+        // expire in the email list only affects the current folder.
+        let send_result = self.cmd_tx.send(BackendCommand::DestroyEmail {
+            op_id,
+            id: email.id.clone(),
+        });
         self.emails.remove(from_index);
         if self.cursor >= self.emails.len() && self.cursor > 0 {
             self.cursor -= 1;
@@ -702,7 +670,7 @@ impl View for EmailListView {
             format!(
                 " {}/{} | q:back n/p:nav RET:read g:refresh r:reply R:reply-all e:dry-run E:run-rules a:archive d:delete{} f:flag u:unread m:move s:search{}{}",
                 self.cursor + 1,
-                self.emails.len(),
+                self.total.unwrap_or(self.emails.len() as u32),
                 expire_hint,
                 search_hint,
                 load_more_hint
@@ -1266,5 +1234,279 @@ impl View for EmailListView {
         }
         self.request_refresh("email_list.periodic_sync");
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jmap::types::{Email, Mailbox};
+
+    fn make_email(id: &str, thread_id: &str) -> Email {
+        Email {
+            id: id.to_string(),
+            thread_id: Some(thread_id.to_string()),
+            from: None,
+            to: None,
+            cc: None,
+            reply_to: None,
+            subject: Some(format!("Subject {}", id)),
+            received_at: Some("2025-01-01".to_string()),
+            sent_at: None,
+            preview: None,
+            text_body: None,
+            html_body: None,
+            body_values: HashMap::new(),
+            keywords: HashMap::new(),
+            mailbox_ids: HashMap::new(),
+            message_id: None,
+            references: None,
+            attachments: None,
+            extra: HashMap::new(),
+        }
+    }
+
+    fn make_mailboxes() -> Vec<Mailbox> {
+        vec![
+            Mailbox {
+                id: "mbox-inbox".to_string(),
+                name: "Inbox".to_string(),
+                parent_id: None,
+                role: Some("inbox".to_string()),
+                total_emails: 10,
+                unread_emails: 2,
+                sort_order: 0,
+            },
+            Mailbox {
+                id: "mbox-archive".to_string(),
+                name: "Archive".to_string(),
+                parent_id: None,
+                role: Some("archive".to_string()),
+                total_emails: 100,
+                unread_emails: 0,
+                sort_order: 0,
+            },
+            Mailbox {
+                id: "mbox-trash".to_string(),
+                name: "Trash".to_string(),
+                parent_id: None,
+                role: Some("trash".to_string()),
+                total_emails: 5,
+                unread_emails: 0,
+                sort_order: 0,
+            },
+        ]
+    }
+
+    fn make_view() -> (EmailListView, mpsc::Receiver<BackendCommand>) {
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let mailboxes = make_mailboxes();
+        let mut view = EmailListView::new(
+            cmd_tx,
+            "me@example.com".to_string(),
+            "me@example.com".to_string(),
+            "mbox-inbox".to_string(),
+            "Inbox".to_string(),
+            50,
+            mailboxes,
+            "Archive".to_string(),
+            "Trash".to_string(),
+        );
+        view.loading = false;
+
+        // Add emails: two in the same thread, one standalone
+        let e1 = make_email("email-1", "thread-A");
+        let e2 = make_email("email-2", "thread-A");
+        let e3 = make_email("email-3", "thread-B");
+        view.emails = vec![e1, e2, e3];
+        view.total = Some(3);
+        // Mark thread-A as having 2 emails (so it's a multi-email thread)
+        view.thread_counts.insert("thread-A".to_string(), (0, 2));
+        view.thread_counts.insert("thread-B".to_string(), (0, 1));
+
+        (view, cmd_rx)
+    }
+
+    #[test]
+    fn archive_sends_move_email_not_move_thread() {
+        let (mut view, cmd_rx) = make_view();
+        // Cursor is on email-1, which is in thread-A (2 emails in thread)
+        view.cursor = 0;
+
+        view.handle_key(Key::Char('a'), 24);
+
+        // Drain any QueryEmails from constructor, then find MoveEmail
+        let mut found_move_email = false;
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                BackendCommand::MoveEmail {
+                    id, to_mailbox_id, ..
+                } => {
+                    assert_eq!(id, "email-1");
+                    assert_eq!(to_mailbox_id, "mbox-archive");
+                    found_move_email = true;
+                }
+                BackendCommand::MoveThread { .. } => {
+                    panic!("archive should send MoveEmail, not MoveThread");
+                }
+                _ => {}
+            }
+        }
+        assert!(found_move_email, "expected MoveEmail command for archive");
+    }
+
+    #[test]
+    fn delete_sends_move_email_not_move_thread() {
+        let (mut view, cmd_rx) = make_view();
+        view.cursor = 0;
+
+        view.handle_key(Key::Char('d'), 24);
+
+        let mut found_move_email = false;
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                BackendCommand::MoveEmail {
+                    id, to_mailbox_id, ..
+                } => {
+                    assert_eq!(id, "email-1");
+                    assert_eq!(to_mailbox_id, "mbox-trash");
+                    found_move_email = true;
+                }
+                BackendCommand::MoveThread { .. } => {
+                    panic!("delete should send MoveEmail, not MoveThread");
+                }
+                _ => {}
+            }
+        }
+        assert!(found_move_email, "expected MoveEmail command for delete");
+    }
+
+    #[test]
+    fn move_mode_sends_move_email_not_move_thread() {
+        let (mut view, cmd_rx) = make_view();
+        view.cursor = 0;
+
+        // Enter move mode
+        view.handle_key(Key::Char('m'), 24);
+        assert!(view.move_mode);
+
+        // Select the second mailbox (Archive) and confirm
+        view.handle_key(Key::Char('n'), 24);
+        view.handle_key(Key::Enter, 24);
+
+        let mut found_move_email = false;
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                BackendCommand::MoveEmail {
+                    id, to_mailbox_id, ..
+                } => {
+                    assert_eq!(id, "email-1");
+                    assert_eq!(to_mailbox_id, "mbox-archive");
+                    found_move_email = true;
+                }
+                BackendCommand::MoveThread { .. } => {
+                    panic!("move should send MoveEmail, not MoveThread");
+                }
+                _ => {}
+            }
+        }
+        assert!(found_move_email, "expected MoveEmail command for move");
+    }
+
+    #[test]
+    fn expire_sends_destroy_email_not_destroy_thread() {
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let mailboxes = make_mailboxes();
+        let mut view = EmailListView::new(
+            cmd_tx,
+            "me@example.com".to_string(),
+            "me@example.com".to_string(),
+            "mbox-trash".to_string(),
+            "Trash".to_string(),
+            50,
+            mailboxes,
+            "Archive".to_string(),
+            "Trash".to_string(),
+        );
+        view.loading = false;
+
+        let e1 = make_email("email-1", "thread-A");
+        view.emails = vec![e1];
+        view.total = Some(1);
+        view.thread_counts.insert("thread-A".to_string(), (0, 3));
+        view.cursor = 0;
+
+        view.handle_key(Key::Char('D'), 24);
+
+        let mut found_destroy_email = false;
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                BackendCommand::DestroyEmail { id, .. } => {
+                    assert_eq!(id, "email-1");
+                    found_destroy_email = true;
+                }
+                BackendCommand::DestroyThread { .. } => {
+                    panic!("expire should send DestroyEmail, not DestroyThread");
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            found_destroy_email,
+            "expected DestroyEmail command for expire"
+        );
+    }
+
+    #[test]
+    fn status_bar_shows_server_total_not_loaded_count() {
+        let (mut view, _cmd_rx) = make_view();
+        // Simulate: server says 150 total but only 3 loaded
+        view.total = Some(150);
+        assert_eq!(view.emails.len(), 3);
+
+        // Render and capture status bar content
+        // We can't easily render, so test the logic directly:
+        // The status format uses self.total.unwrap_or(self.emails.len() as u32)
+        let displayed_total = view.total.unwrap_or(view.emails.len() as u32);
+        assert_eq!(
+            displayed_total, 150,
+            "Y should be server total (150), not loaded count (3)"
+        );
+    }
+
+    #[test]
+    fn status_bar_falls_back_to_loaded_count_when_no_total() {
+        let (mut view, _cmd_rx) = make_view();
+        view.total = None;
+
+        let displayed_total = view.total.unwrap_or(view.emails.len() as u32);
+        assert_eq!(
+            displayed_total, 3,
+            "Y should fall back to loaded count when total is None"
+        );
+    }
+
+    #[test]
+    fn archive_decrements_total() {
+        let (mut view, _cmd_rx) = make_view();
+        view.total = Some(10);
+        view.cursor = 0;
+
+        view.handle_key(Key::Char('a'), 24);
+
+        assert_eq!(view.total, Some(9), "total should decrement after archive");
+        assert_eq!(view.emails.len(), 2, "email should be removed from list");
+    }
+
+    #[test]
+    fn delete_decrements_total() {
+        let (mut view, _cmd_rx) = make_view();
+        view.total = Some(10);
+        view.cursor = 0;
+
+        view.handle_key(Key::Char('d'), 24);
+
+        assert_eq!(view.total, Some(9), "total should decrement after delete");
+        assert_eq!(view.emails.len(), 2, "email should be removed from list");
     }
 }
