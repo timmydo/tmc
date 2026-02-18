@@ -77,31 +77,63 @@ fn parse_escape() -> Key {
         b'D' => Key::Left,
         b'H' => Key::Home,
         b'F' => Key::End,
-        // Extended sequences like ESC [ 5 ~
-        b'1'..=b'8' => {
-            let num = buf[0];
-            // Read the trailing ~ or ;
-            match io::stdin().read(&mut buf) {
-                Ok(0) => Key::Escape,
-                Ok(_) => {
-                    if buf[0] == b'~' {
-                        match num {
-                            b'3' => Key::Delete,
-                            b'5' => Key::PageUp,
-                            b'6' => Key::PageDown,
-                            _ => Key::Escape,
-                        }
-                    } else {
-                        // Consume any remaining bytes of the sequence
-                        Key::Escape
-                    }
-                }
-                Err(_) => Key::Escape,
-            }
-        }
+        // Extended sequences like ESC [ 5 ~ or CSI u like ESC [ 13 ; 7 u
+        b'0'..=b'9' => parse_csi_number(buf[0]),
         // SGR mouse: ESC [ < ...
         b'<' => parse_sgr_mouse(),
         _ => Key::Escape,
+    }
+}
+
+fn parse_csi_number(first_digit: u8) -> Key {
+    let mut num: u16 = (first_digit - b'0') as u16;
+    let mut buf = [0u8; 1];
+
+    // Read remaining digits or terminator
+    loop {
+        match io::stdin().read(&mut buf) {
+            Ok(0) | Err(_) => return Key::Escape,
+            Ok(_) => {}
+        }
+        match buf[0] {
+            b'0'..=b'9' => {
+                num = num
+                    .saturating_mul(10)
+                    .saturating_add((buf[0] - b'0') as u16);
+            }
+            b'~' => {
+                return match num {
+                    3 => Key::Delete,
+                    5 => Key::PageUp,
+                    6 => Key::PageDown,
+                    _ => Key::Escape,
+                };
+            }
+            b';' => {
+                // CSI u format: ESC [ keycode ; modifiers u
+                // Read modifier number
+                let mut modifiers: u16 = 0;
+                loop {
+                    match io::stdin().read(&mut buf) {
+                        Ok(0) | Err(_) => return Key::Escape,
+                        Ok(_) => {}
+                    }
+                    match buf[0] {
+                        b'0'..=b'9' => {
+                            modifiers = modifiers
+                                .saturating_mul(10)
+                                .saturating_add((buf[0] - b'0') as u16);
+                        }
+                        b'u' => {
+                            return Key::Escape;
+                        }
+                        b'~' => return Key::Escape,
+                        _ => return Key::Escape,
+                    }
+                }
+            }
+            _ => return Key::Escape,
+        }
     }
 }
 

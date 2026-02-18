@@ -58,6 +58,19 @@ impl Cache {
         serde_json::from_slice(value.value()).ok()
     }
 
+    pub fn remove_email(&self, id: &str) {
+        let txn = match self.db.begin_write() {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        {
+            if let Ok(mut table) = txn.open_table(EMAILS) {
+                let _ = table.remove(id);
+            }
+        }
+        let _ = txn.commit();
+    }
+
     pub fn put_emails(&self, emails: &[Email]) {
         if emails.is_empty() {
             return;

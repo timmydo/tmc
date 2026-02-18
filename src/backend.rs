@@ -644,6 +644,11 @@ fn backend_loop(
                     log_warn!("Failed to move email {}: {}", id, msg);
                     msg
                 });
+                if result.is_ok() {
+                    if let Some(ref cache) = cache {
+                        cache.remove_email(&id);
+                    }
+                }
                 let _ = resp_tx.send(BackendResponse::EmailMutation {
                     op_id,
                     id,

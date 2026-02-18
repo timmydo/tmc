@@ -45,6 +45,9 @@ pub struct ThreadView {
     archive_folder: String,
     deleted_folder: String,
     can_expire_now: bool,
+    /// If set, only show emails in this mailbox (same-folder mode).
+    /// If None, show all emails across folders (cross-folder mode).
+    filter_mailbox_id: Option<String>,
 }
 
 impl ThreadView {
@@ -58,6 +61,7 @@ impl ThreadView {
         archive_folder: String,
         deleted_folder: String,
         can_expire_now: bool,
+        filter_mailbox_id: Option<String>,
     ) -> Self {
         let _ = cmd_tx.send(BackendCommand::QueryThreadEmails {
             thread_id: thread_id.clone(),
@@ -81,6 +85,7 @@ impl ThreadView {
             archive_folder,
             deleted_folder,
             can_expire_now,
+            filter_mailbox_id,
         }
     }
 
@@ -90,6 +95,23 @@ impl ThreadView {
 
     fn is_flagged(email: &Email) -> bool {
         email.keywords.contains_key("$flagged")
+    }
+
+    fn mailbox_name_for_email(&self, email: &Email) -> String {
+        for mbox_id in email.mailbox_ids.keys() {
+            if let Some(mbox) = self.mailboxes.iter().find(|m| m.id == *mbox_id) {
+                return mbox.name.clone();
+            }
+        }
+        "(unknown)".to_string()
+    }
+
+    fn filter_emails(emails: &[Email], mailbox_id: &str) -> Vec<Email> {
+        emails
+            .iter()
+            .filter(|e| e.mailbox_ids.contains_key(mailbox_id))
+            .cloned()
+            .collect()
     }
 
     fn format_email(email: &Email, width: u16) -> String {
@@ -127,6 +149,52 @@ impl ThreadView {
             unread,
             flagged,
             date,
+            from_display,
+            subj_display,
+            from_w = from_width
+        )
+    }
+
+    fn format_email_cross_folder(email: &Email, folder_name: &str, width: u16) -> String {
+        let unread = if Self::is_unread(email) { "N" } else { " " };
+        let flagged = if Self::is_flagged(email) { "F" } else { " " };
+
+        let from = email
+            .from
+            .as_ref()
+            .and_then(|addrs| addrs.first())
+            .map(|a| {
+                a.name
+                    .as_deref()
+                    .unwrap_or_else(|| a.email.as_deref().unwrap_or("(unknown)"))
+            })
+            .unwrap_or("(unknown)");
+
+        let subject = email.subject.as_deref().unwrap_or("(no subject)");
+
+        let date = email
+            .received_at
+            .as_deref()
+            .map(|d| if d.len() >= 10 { &d[..10] } else { d })
+            .unwrap_or("");
+
+        let w = width as usize;
+        let folder_width = 12.min(folder_name.len());
+        // prefix: " NF YYYY-MM-DD [folder] " = 4 + 10 + 3 + folder_width + 2
+        let prefix_len = 19 + folder_width + 2;
+        let from_width = 20.min(w.saturating_sub(prefix_len));
+        let subj_width = w.saturating_sub(prefix_len + from_width);
+
+        let folder_display = truncate(folder_name, 12);
+        let from_display = truncate(from, from_width);
+        let subj_display = truncate(subject, subj_width);
+
+        format!(
+            " {}{} {} [{}] {:from_w$} {}",
+            unread,
+            flagged,
+            date,
+            folder_display,
             from_display,
             subj_display,
             from_w = from_width
@@ -324,7 +392,17 @@ impl View for ThreadView {
         // Header
         term.move_to(1, 1)?;
         term.set_header()?;
-        let header = format!("Thread: {} ({} messages)", self.subject, self.emails.len());
+        let mode_label = if self.filter_mailbox_id.is_some() {
+            "Thread"
+        } else {
+            "Thread (all folders)"
+        };
+        let header = format!(
+            "{}: {} ({} messages)",
+            mode_label,
+            self.subject,
+            self.emails.len()
+        );
         term.write_truncated(&header, term.cols)?;
         term.reset_attr()?;
 
@@ -356,7 +434,12 @@ impl View for ThreadView {
                 term.move_to(row, 1)?;
 
                 let display_idx = self.scroll_offset + i;
-                let line = Self::format_email(email, term.cols);
+                let line = if self.filter_mailbox_id.is_none() {
+                    let folder = self.mailbox_name_for_email(email);
+                    Self::format_email_cross_folder(email, &folder, term.cols)
+                } else {
+                    Self::format_email(email, term.cols)
+                };
 
                 if display_idx == self.cursor {
                     term.set_selection()?;
@@ -577,7 +660,11 @@ impl View for ThreadView {
                 self.loading = false;
                 match emails {
                     Ok(emails) => {
-                        self.emails = emails.clone();
+                        self.emails = if let Some(ref mbox_id) = self.filter_mailbox_id {
+                            Self::filter_emails(emails, mbox_id)
+                        } else {
+                            emails.clone()
+                        };
                         self.error = None;
                         self.pending_write_ops.clear();
                         if self.cursor >= self.emails.len() && !self.emails.is_empty() {

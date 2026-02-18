@@ -135,9 +135,15 @@ pub fn all_keybindings() -> Vec<KeyBinding> {
         },
         KeyBinding {
             view: "email_list",
-            key: "Alt-Enter",
+            key: "t",
             action: "open_thread",
-            description: "Open thread list view",
+            description: "Open thread list view (same folder)",
+        },
+        KeyBinding {
+            view: "email_list",
+            key: "T",
+            action: "open_thread_cross_folder",
+            description: "Open thread list view (all folders)",
         },
         KeyBinding {
             view: "email_list",

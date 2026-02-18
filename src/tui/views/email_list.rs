@@ -315,7 +315,7 @@ impl EmailListView {
         }
     }
 
-    fn open_thread_list(&mut self) -> Option<ViewAction> {
+    fn open_thread_list(&mut self, cross_folder: bool) -> Option<ViewAction> {
         let email = self.emails.get(self.cursor)?;
         let thread_total = self
             .get_thread_counts(email)
@@ -323,12 +323,17 @@ impl EmailListView {
             .unwrap_or(1);
         let can_expire_now = self.is_in_deleted_folder();
 
-        if thread_total > 1 {
+        if thread_total > 1 || cross_folder {
             let thread_id = email.thread_id.clone().unwrap_or_default();
             let subject = email
                 .subject
                 .clone()
                 .unwrap_or_else(|| "(no subject)".to_string());
+            let filter_mailbox_id = if cross_folder {
+                None
+            } else {
+                Some(self.mailbox_id.clone())
+            };
             let view = ThreadView::new(
                 self.cmd_tx.clone(),
                 self.from_address.clone(),
@@ -339,6 +344,7 @@ impl EmailListView {
                 self.archive_folder.clone(),
                 self.deleted_folder.clone(),
                 can_expire_now,
+                filter_mailbox_id,
             );
             Some(ViewAction::Push(Box::new(view)))
         } else {
@@ -869,7 +875,8 @@ impl View for EmailListView {
                 ViewAction::Continue
             }
             Key::Enter => self.open_selected().unwrap_or(ViewAction::Continue),
-            Key::AltEnter => self.open_thread_list().unwrap_or(ViewAction::Continue),
+            Key::Char('t') => self.open_thread_list(false).unwrap_or(ViewAction::Continue),
+            Key::Char('T') => self.open_thread_list(true).unwrap_or(ViewAction::Continue),
             Key::Char('g') => {
                 self.request_refresh("email_list.key_g");
                 ViewAction::Continue
