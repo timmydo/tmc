@@ -562,8 +562,13 @@ impl EmailView {
                         "xdg-open".to_string()
                     }
                 });
-            match std::process::Command::new(&browser)
-                .arg(url)
+            // Use shell to support complex browser commands with arguments.
+            // The URL is shell-escaped with single quotes.
+            let escaped_url = format!("'{}'", url.replace('\'', "'\\''"));
+            let shell_cmd = format!("{} {}", browser, escaped_url);
+            match std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&shell_cmd)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
