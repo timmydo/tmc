@@ -358,12 +358,13 @@ impl View for MailboxListView {
             }
             Key::Enter => {
                 if let Some(mailbox) = self.mailboxes.get(self.cursor) {
+                    let reply_from = self
+                        .reply_from_address
+                        .clone()
+                        .unwrap_or_else(|| self.from_address.clone());
                     let view = EmailListView::new(
                         self.cmd_tx.clone(),
-                        self.from_address.clone(),
-                        self.reply_from_address
-                            .clone()
-                            .unwrap_or_else(|| self.from_address.clone()),
+                        reply_from,
                         mailbox.id.clone(),
                         mailbox.name.clone(),
                         self.page_size,
@@ -434,7 +435,11 @@ impl View for MailboxListView {
                 ViewAction::Continue
             }
             Key::Char('c') => {
-                let draft = compose::build_compose_draft(&self.from_address);
+                let from = self
+                    .reply_from_address
+                    .as_deref()
+                    .unwrap_or(&self.from_address);
+                let draft = compose::build_compose_draft(from);
                 ViewAction::Compose(draft)
             }
             Key::Char('a') => {
@@ -482,12 +487,13 @@ impl View for MailboxListView {
         if self.pending_click {
             self.pending_click = false;
             if let Some(mailbox) = self.mailboxes.get(self.cursor) {
+                let reply_from = self
+                    .reply_from_address
+                    .clone()
+                    .unwrap_or_else(|| self.from_address.clone());
                 let view = EmailListView::new(
                     self.cmd_tx.clone(),
-                    self.from_address.clone(),
-                    self.reply_from_address
-                        .clone()
-                        .unwrap_or_else(|| self.from_address.clone()),
+                    reply_from,
                     mailbox.id.clone(),
                     mailbox.name.clone(),
                     self.page_size,

@@ -1266,11 +1266,8 @@ fn cmd_download_attachment(state: &mut CliState, input: &Value) -> Value {
 }
 
 fn cmd_compose_draft(state: &CliState) -> Value {
-    let from = state
-        .connected_username
-        .as_deref()
-        .unwrap_or("user@example.com");
-    let draft = compose::build_compose_draft(from);
+    let from = state.reply_from_header();
+    let draft = compose::build_compose_draft(&from);
     ok_response(json!({"draft": draft}))
 }
 
@@ -1321,11 +1318,8 @@ fn cmd_forward_draft(state: &mut CliState, input: &Value) -> Value {
             ..
         }) => match *boxed_result {
             Ok(email) => {
-                let from = state
-                    .connected_username
-                    .as_deref()
-                    .unwrap_or("user@example.com");
-                let draft = compose::build_forward_draft(&email, from);
+                let from = state.reply_from_header();
+                let draft = compose::build_forward_draft(&email, &from);
                 ok_response(json!({"draft": draft}))
             }
             Err(e) => err_response(&e),

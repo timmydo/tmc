@@ -147,7 +147,6 @@ enum PendingWriteOp {
 
 pub struct EmailView {
     cmd_tx: mpsc::Sender<BackendCommand>,
-    from_address: String,
     reply_from_address: String,
     can_expire_now: bool,
     email_id: String,
@@ -180,7 +179,6 @@ pub struct EmailView {
 impl EmailView {
     pub fn new(
         cmd_tx: mpsc::Sender<BackendCommand>,
-        from_address: String,
         reply_from_address: String,
         email_id: String,
         can_expire_now: bool,
@@ -190,7 +188,6 @@ impl EmailView {
     ) -> Self {
         EmailView {
             cmd_tx,
-            from_address,
             reply_from_address,
             can_expire_now,
             email_id,
@@ -223,7 +220,6 @@ impl EmailView {
 
     pub fn new_thread(
         cmd_tx: mpsc::Sender<BackendCommand>,
-        from_address: String,
         reply_from_address: String,
         thread_id: String,
         _subject: String,
@@ -237,7 +233,6 @@ impl EmailView {
         });
         EmailView {
             cmd_tx,
-            from_address,
             reply_from_address,
             can_expire_now,
             email_id: String::new(),
@@ -971,7 +966,7 @@ impl View for EmailView {
                 ViewAction::Continue
             }
             Key::Char('c') => {
-                let draft = compose::build_compose_draft(&self.from_address);
+                let draft = compose::build_compose_draft(&self.reply_from_address);
                 ViewAction::Compose(draft)
             }
             Key::Char('v') => {
@@ -1113,7 +1108,7 @@ impl View for EmailView {
                     Ok(email) => {
                         self.email = Some(email.clone());
                         if is_forward {
-                            let draft = compose::build_forward_draft(email, &self.from_address);
+                            let draft = compose::build_forward_draft(email, &self.reply_from_address);
                             self.pending_compose = Some(draft);
                         } else if let Some(reply_all) = reply_all {
                             let draft = compose::build_reply_draft(

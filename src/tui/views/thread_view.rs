@@ -28,7 +28,6 @@ enum PendingWriteOp {
 
 pub struct ThreadView {
     cmd_tx: mpsc::Sender<BackendCommand>,
-    from_address: String,
     reply_from_address: String,
     thread_id: String,
     subject: String,
@@ -53,7 +52,6 @@ pub struct ThreadView {
 impl ThreadView {
     pub fn new(
         cmd_tx: mpsc::Sender<BackendCommand>,
-        from_address: String,
         reply_from_address: String,
         thread_id: String,
         subject: String,
@@ -68,7 +66,6 @@ impl ThreadView {
         });
         ThreadView {
             cmd_tx,
-            from_address,
             reply_from_address,
             thread_id,
             subject,
@@ -250,7 +247,6 @@ impl ThreadView {
         let was_seen = email.keywords.contains_key("$seen");
         let view = EmailView::new(
             self.cmd_tx.clone(),
-            self.from_address.clone(),
             self.reply_from_address.clone(),
             email_id.clone(),
             self.can_expire_now,
@@ -613,7 +609,7 @@ impl View for ThreadView {
                 ViewAction::Continue
             }
             Key::Char('c') => {
-                let draft = compose::build_compose_draft(&self.from_address);
+                let draft = compose::build_compose_draft(&self.reply_from_address);
                 ViewAction::Compose(draft)
             }
             Key::Char('?') => ViewAction::Push(Box::new(HelpView::new())),

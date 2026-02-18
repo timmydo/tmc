@@ -31,7 +31,6 @@ enum PendingWriteOp {
 
 pub struct EmailListView {
     cmd_tx: mpsc::Sender<BackendCommand>,
-    from_address: String,
     reply_from_address: String,
     mailbox_id: String,
     mailbox_name: String,
@@ -67,7 +66,6 @@ pub struct EmailListView {
 impl EmailListView {
     pub fn new(
         cmd_tx: mpsc::Sender<BackendCommand>,
-        from_address: String,
         reply_from_address: String,
         mailbox_id: String,
         mailbox_name: String,
@@ -78,7 +76,6 @@ impl EmailListView {
     ) -> Self {
         EmailListView {
             cmd_tx,
-            from_address,
             reply_from_address,
             mailbox_id,
             mailbox_name,
@@ -300,7 +297,6 @@ impl EmailListView {
                 .unwrap_or_else(|| "(no subject)".to_string());
             let view = EmailView::new_thread(
                 self.cmd_tx.clone(),
-                self.from_address.clone(),
                 self.reply_from_address.clone(),
                 thread_id,
                 subject,
@@ -336,7 +332,6 @@ impl EmailListView {
             };
             let view = ThreadView::new(
                 self.cmd_tx.clone(),
-                self.from_address.clone(),
                 self.reply_from_address.clone(),
                 thread_id,
                 subject,
@@ -358,7 +353,6 @@ impl EmailListView {
         let was_seen = email.keywords.contains_key("$seen");
         let view = EmailView::new(
             self.cmd_tx.clone(),
-            self.from_address.clone(),
             self.reply_from_address.clone(),
             email_id.clone(),
             self.is_in_deleted_folder(),
@@ -1017,7 +1011,7 @@ impl View for EmailListView {
                 ViewAction::Continue
             }
             Key::Char('c') => {
-                let draft = compose::build_compose_draft(&self.from_address);
+                let draft = compose::build_compose_draft(&self.reply_from_address);
                 ViewAction::Compose(draft)
             }
             Key::Char('?') => ViewAction::Push(Box::new(HelpView::new())),
@@ -1304,7 +1298,6 @@ mod tests {
         let mut view = EmailListView::new(
             cmd_tx,
             "me@example.com".to_string(),
-            "me@example.com".to_string(),
             "mbox-inbox".to_string(),
             "Inbox".to_string(),
             50,
@@ -1419,7 +1412,6 @@ mod tests {
         let mailboxes = make_mailboxes();
         let mut view = EmailListView::new(
             cmd_tx,
-            "me@example.com".to_string(),
             "me@example.com".to_string(),
             "mbox-trash".to_string(),
             "Trash".to_string(),
