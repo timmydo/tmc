@@ -16,6 +16,7 @@ pub struct MailboxListView {
     cmd_tx: mpsc::Sender<BackendCommand>,
     from_address: String,
     reply_from_address: Option<String>,
+    browser: Option<String>,
     page_size: u32,
     mailboxes: Vec<Mailbox>,
     cursor: usize,
@@ -41,6 +42,7 @@ impl MailboxListView {
         cmd_tx: mpsc::Sender<BackendCommand>,
         from_address: String,
         reply_from_address: Option<String>,
+        browser: Option<String>,
         page_size: u32,
         account_names: Vec<String>,
         current_account: String,
@@ -52,6 +54,7 @@ impl MailboxListView {
             cmd_tx,
             from_address,
             reply_from_address,
+            browser,
             page_size,
             mailboxes: Vec::new(),
             cursor: 0,
@@ -372,6 +375,7 @@ impl View for MailboxListView {
                         self.mailboxes.clone(),
                         self.archive_folder.clone(),
                         self.deleted_folder.clone(),
+                        self.browser.clone(),
                     );
                     // Send the query command
                     let _ = self.cmd_tx.send(BackendCommand::QueryEmails {
@@ -501,6 +505,7 @@ impl View for MailboxListView {
                     self.mailboxes.clone(),
                     self.archive_folder.clone(),
                     self.deleted_folder.clone(),
+                    self.browser.clone(),
                 );
                 let _ = self.cmd_tx.send(BackendCommand::QueryEmails {
                     origin: "mailbox_list.open_click".to_string(),

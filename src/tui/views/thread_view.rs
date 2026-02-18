@@ -47,6 +47,7 @@ pub struct ThreadView {
     /// If set, only show emails in this mailbox (same-folder mode).
     /// If None, show all emails across folders (cross-folder mode).
     filter_mailbox_id: Option<String>,
+    browser: Option<String>,
 }
 
 impl ThreadView {
@@ -61,6 +62,7 @@ impl ThreadView {
         deleted_folder: String,
         can_expire_now: bool,
         filter_mailbox_id: Option<String>,
+        browser: Option<String>,
     ) -> Self {
         let _ = cmd_tx.send(BackendCommand::QueryThreadEmails {
             thread_id: thread_id.clone(),
@@ -84,6 +86,7 @@ impl ThreadView {
             deleted_folder,
             can_expire_now,
             filter_mailbox_id,
+            browser,
         }
     }
 
@@ -254,6 +257,7 @@ impl ThreadView {
             self.mailboxes.clone(),
             self.archive_folder.clone(),
             self.deleted_folder.clone(),
+            self.browser.clone(),
         );
         let _ = self.cmd_tx.send(BackendCommand::GetEmail {
             id: email_id.clone(),

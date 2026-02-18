@@ -453,5 +453,17 @@ pub fn all_keybindings() -> Vec<KeyBinding> {
             action: "move",
             description: "Move to mailbox (interactive picker)",
         },
+        KeyBinding {
+            view: "email_view",
+            key: "b",
+            action: "browse_urls",
+            description: "Browse URLs found in message body",
+        },
+        KeyBinding {
+            view: "email_view",
+            key: "1-9",
+            action: "open_url",
+            description: "Open URL by number in configured browser",
+        },
     ]
 }

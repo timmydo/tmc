@@ -119,6 +119,7 @@ Here is the format:
 ```toml
 [ui]
 editor = "nvim"          # optional: editor for composing ($EDITOR fallback)
+browser = "firefox"      # optional: browser for opening URLs ($BROWSER fallback, then xdg-open)
 page_size = 100           # optional: emails per page (default 500)
 mouse = true              # optional: enable mouse support (default true)
 sync_interval_secs = 60   # optional: background sync interval (default 60, 0 = off)
@@ -259,6 +260,56 @@ Please ask me what kinds of emails I receive and how I want them organized, then
     }
 }
 
+fn print_help_config() {
+    let config_path = default_config_path();
+    println!("Default config file: {}", config_path.display());
+    println!();
+    println!("Available options:");
+    println!();
+    println!("[ui]");
+    println!(
+        "  editor = \"nvim\"              # Editor for composing (fallback: $EDITOR, then vi)"
+    );
+    println!("  browser = \"firefox\"           # Browser for opening URLs (fallback: $BROWSER, xdg-open)");
+    println!("  page_size = 500              # Emails per page (default: 500)");
+    println!("  mouse = true                 # Enable mouse support (default: true)");
+    println!("  sync_interval_secs = 60      # Background sync interval in seconds (default: 60, 0 = off)");
+    println!();
+    println!("[mail]");
+    println!("  archive_folder = \"archive\"   # Target folder for 'a' archive action (default: \"archive\")");
+    println!("  deleted_folder = \"trash\"     # Target folder for 'd' delete action (default: \"trash\")");
+    println!("  archive_mailbox_id = \"id\"    # Override archive folder by JMAP mailbox ID");
+    println!("  deleted_mailbox_id = \"id\"    # Override deleted folder by JMAP mailbox ID");
+    println!("  reply_from = \"Name <email>\"  # Override From header for replies/compose/forward");
+    println!("  rules_mailbox_regex = \"^INBOX$\"  # Run rules only on matching mailbox names (default: \"^INBOX$\")");
+    println!("  my_email_regex = \"^$\"        # Your email addresses for skip_if_to_me rule option (default: \"^$\")");
+    println!();
+    println!("[account.NAME]                   # At least one account required");
+    println!(
+        "  well_known_url = \"https://.../.well-known/jmap\"  # JMAP discovery URL (required)"
+    );
+    println!("  username = \"user@example.com\"                    # Email address (required)");
+    println!("  password_command = \"pass show email/example\"     # Shell command returning password (required)");
+    println!();
+    println!("[retention.NAME]                 # Optional folder retention policies");
+    println!("  folder = \"Archive\"            # Mailbox name to apply retention (required)");
+    println!("  days = 365                   # Expire mail older than this many days (required)");
+    println!();
+    println!("[theme]                          # Optional color customization (#RRGGBB hex)");
+    println!("  bg = \"#002b36\"               # Background color");
+    println!("  fg = \"#839496\"               # Foreground color");
+    println!("  bold_fg = \"#93a1a1\"          # Bold text color");
+    println!("  selection_bg = \"#073642\"     # Selection background");
+    println!("  selection_fg = \"#eee8d5\"     # Selection foreground");
+    println!("  status_bg = \"#586e75\"        # Status bar background");
+    println!("  status_fg = \"#eee8d5\"        # Status bar foreground");
+    println!("  header_fg = \"#268bd2\"        # Header text color");
+    println!();
+    println!(
+        "Legacy: [jmap] section with well_known_url, username, password_command is also supported."
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -276,6 +327,7 @@ fn main() {
         eprintln!("  --prompt=TOPIC   Print an AI-friendly prompt (config, rules)");
         eprintln!("  --cli            Run in JSON-over-stdin/stdout CLI mode");
         eprintln!("  --help-cli       Print CLI mode protocol documentation");
+        eprintln!("  --help-config    Print default config path and all options");
         eprintln!("  --help           Show this help");
         std::process::exit(0);
     }
@@ -315,6 +367,11 @@ fn main() {
 
     if args.iter().any(|a| a == "--help-cli") {
         cli::print_help_cli();
+        std::process::exit(0);
+    }
+
+    if args.iter().any(|a| a == "--help-config") {
+        print_help_config();
         std::process::exit(0);
     }
 
@@ -434,6 +491,7 @@ fn main() {
         first_account_name,
         config.ui.page_size,
         config.ui.editor,
+        config.ui.browser,
         config.ui.mouse,
         config.ui.sync_interval_secs,
         config.mail.archive_folder,

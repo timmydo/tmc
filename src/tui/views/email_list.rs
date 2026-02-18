@@ -60,6 +60,7 @@ pub struct EmailListView {
     scroll_offset: usize,
     archive_folder: String,
     deleted_folder: String,
+    browser: Option<String>,
     last_refreshed: Option<SystemTime>,
 }
 
@@ -74,6 +75,7 @@ impl EmailListView {
         mailboxes: Vec<Mailbox>,
         archive_folder: String,
         deleted_folder: String,
+        browser: Option<String>,
     ) -> Self {
         EmailListView {
             cmd_tx,
@@ -106,6 +108,7 @@ impl EmailListView {
             scroll_offset: 0,
             archive_folder,
             deleted_folder,
+            browser,
             last_refreshed: None,
         }
     }
@@ -305,6 +308,7 @@ impl EmailListView {
                 self.mailboxes.clone(),
                 self.archive_folder.clone(),
                 self.deleted_folder.clone(),
+                self.browser.clone(),
             );
             Some(ViewAction::Push(Box::new(view)))
         } else {
@@ -341,6 +345,7 @@ impl EmailListView {
                 self.deleted_folder.clone(),
                 can_expire_now,
                 filter_mailbox_id,
+                self.browser.clone(),
             );
             Some(ViewAction::Push(Box::new(view)))
         } else {
@@ -360,6 +365,7 @@ impl EmailListView {
             self.mailboxes.clone(),
             self.archive_folder.clone(),
             self.deleted_folder.clone(),
+            self.browser.clone(),
         );
         let _ = self.cmd_tx.send(BackendCommand::GetEmail {
             id: email_id.clone(),
@@ -1305,6 +1311,7 @@ mod tests {
             mailboxes,
             "Archive".to_string(),
             "Trash".to_string(),
+            None,
         );
         view.loading = false;
 
@@ -1420,6 +1427,7 @@ mod tests {
             mailboxes,
             "Archive".to_string(),
             "Trash".to_string(),
+            None,
         );
         view.loading = false;
 

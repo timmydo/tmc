@@ -6,6 +6,7 @@ use crate::tui::input::Key;
 use crate::tui::screen::Terminal;
 use crate::tui::views::help::HelpView;
 use crate::tui::views::{View, ViewAction};
+use regex::Regex;
 use std::collections::HashMap;
 use std::io;
 use std::sync::mpsc;
@@ -140,6 +141,20 @@ fn html_to_terminal(html: &str) -> String {
     .unwrap_or_else(|_| html.to_string())
 }
 
+/// Extract unique URLs from text content. Finds http/https URLs.
+fn extract_urls(text: &str) -> Vec<String> {
+    let re = Regex::new(r#"https?://[^\s<>\]\)"'`]+"#).unwrap();
+    let mut seen = Vec::new();
+    for m in re.find_iter(text) {
+        let url = m.as_str().trim_end_matches(['.', ',', ';', ':', '!', '?']);
+        let url = url.to_string();
+        if !seen.contains(&url) {
+            seen.push(url);
+        }
+    }
+    seen
+}
+
 enum PendingWriteOp {
     Flag { old_flagged: bool },
     Seen { old_seen: bool },
@@ -174,9 +189,14 @@ pub struct EmailView {
     move_mode: bool,
     move_cursor: usize,
     prefer_html: bool,
+    browser: Option<String>,
+    urls: Vec<String>,
+    url_picking: bool,
+    url_cursor: usize,
 }
 
 impl EmailView {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cmd_tx: mpsc::Sender<BackendCommand>,
         reply_from_address: String,
@@ -185,6 +205,7 @@ impl EmailView {
         mailboxes: Vec<Mailbox>,
         archive_folder: String,
         deleted_folder: String,
+        browser: Option<String>,
     ) -> Self {
         EmailView {
             cmd_tx,
@@ -215,6 +236,10 @@ impl EmailView {
             move_mode: false,
             move_cursor: 0,
             prefer_html: false,
+            browser,
+            urls: Vec::new(),
+            url_picking: false,
+            url_cursor: 0,
         }
     }
 
@@ -228,6 +253,7 @@ impl EmailView {
         mailboxes: Vec<Mailbox>,
         archive_folder: String,
         deleted_folder: String,
+        browser: Option<String>,
     ) -> Self {
         let _ = cmd_tx.send(BackendCommand::QueryThreadEmails {
             thread_id: thread_id.clone(),
@@ -261,6 +287,10 @@ impl EmailView {
             move_mode: false,
             move_cursor: 0,
             prefer_html: false,
+            browser,
+            urls: Vec::new(),
+            url_picking: false,
+            url_cursor: 0,
         }
     }
 
@@ -309,7 +339,7 @@ impl EmailView {
         email: &Email,
         raw_headers: Option<&str>,
         prefer_html: bool,
-    ) -> (Vec<String>, Vec<LineKind>) {
+    ) -> (Vec<String>, Vec<LineKind>, Vec<String>) {
         let mut lines = Vec::new();
         let mut kinds = Vec::new();
 
@@ -345,16 +375,30 @@ impl EmailView {
             kinds.push(LineKind::Body);
         }
 
-        (lines, kinds)
+        // Extract and append URLs
+        let urls = extract_urls(&body_text);
+        if !urls.is_empty() {
+            lines.push(String::new());
+            kinds.push(LineKind::Body);
+            lines.push("Links:".to_string());
+            kinds.push(LineKind::Header);
+            for (i, url) in urls.iter().enumerate() {
+                lines.push(format!("  [{}] {}", i + 1, url));
+                kinds.push(LineKind::Body);
+            }
+        }
+
+        (lines, kinds, urls)
     }
 
     fn render_thread_emails(
         emails: &[Email],
         raw_headers_cache: &HashMap<String, String>,
         prefer_html: bool,
-    ) -> (Vec<String>, Vec<LineKind>) {
+    ) -> (Vec<String>, Vec<LineKind>, Vec<String>) {
         let mut lines = Vec::new();
         let mut kinds = Vec::new();
+        let mut all_urls = Vec::new();
         for (i, email) in emails.iter().enumerate() {
             if i > 0 {
                 lines.push(String::new());
@@ -373,8 +417,24 @@ impl EmailView {
                 lines.push(line.to_string());
                 kinds.push(LineKind::Body);
             }
+            for url in extract_urls(&body_text) {
+                if !all_urls.contains(&url) {
+                    all_urls.push(url);
+                }
+            }
         }
-        (lines, kinds)
+        // Append combined URL list at end
+        if !all_urls.is_empty() {
+            lines.push(String::new());
+            kinds.push(LineKind::Body);
+            lines.push("Links:".to_string());
+            kinds.push(LineKind::Header);
+            for (i, url) in all_urls.iter().enumerate() {
+                lines.push(format!("  [{}] {}", i + 1, url));
+                kinds.push(LineKind::Body);
+            }
+        }
+        (lines, kinds, all_urls)
     }
 
     fn extract_body(email: &Email, prefer_html: bool) -> String {
@@ -489,6 +549,39 @@ impl EmailView {
             .unwrap_or(0)
     }
 
+    fn open_url(&mut self, index: usize) {
+        if let Some(url) = self.urls.get(index) {
+            let browser = self
+                .browser
+                .clone()
+                .or_else(|| std::env::var("BROWSER").ok())
+                .unwrap_or_else(|| {
+                    if cfg!(target_os = "macos") {
+                        "open".to_string()
+                    } else {
+                        "xdg-open".to_string()
+                    }
+                });
+            match std::process::Command::new(&browser)
+                .arg(url)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(_) => {
+                    self.status_message = Some(format!("Opening [{}]...", index + 1));
+                }
+                Err(e) => {
+                    self.status_message =
+                        Some(format!("Failed to open browser '{}': {}", browser, e));
+                }
+            }
+        } else {
+            self.status_message = Some("Invalid URL number".to_string());
+        }
+    }
+
     fn rerender_lines(&mut self) {
         if self.thread_id.is_some() && !self.thread_emails.is_empty() {
             let cache = if self.show_all_headers {
@@ -497,19 +590,21 @@ impl EmailView {
                 // Empty map = use structured headers
                 &HashMap::new()
             };
-            let (lines, kinds) =
+            let (lines, kinds, urls) =
                 Self::render_thread_emails(&self.thread_emails, cache, self.prefer_html);
             self.lines = lines;
             self.line_kinds = kinds;
+            self.urls = urls;
         } else if let Some(ref email) = self.email {
             let raw = if self.show_all_headers {
                 self.raw_headers_cache.get(&email.id).map(|s| s.as_str())
             } else {
                 None
             };
-            let (lines, kinds) = Self::render_email(email, raw, self.prefer_html);
+            let (lines, kinds, urls) = Self::render_email(email, raw, self.prefer_html);
             self.lines = lines;
             self.line_kinds = kinds;
+            self.urls = urls;
         }
     }
 
@@ -649,6 +744,59 @@ impl View for EmailView {
             return term.flush();
         }
 
+        if self.url_picking {
+            term.move_to(1, 1)?;
+            term.set_header()?;
+            term.write_truncated("Open URL:", term.cols)?;
+            term.reset_attr()?;
+
+            let max_items = (term.rows as usize).saturating_sub(3);
+            let url_scroll = if self.url_cursor >= max_items {
+                self.url_cursor - max_items + 1
+            } else {
+                0
+            };
+
+            for (i, url) in self
+                .urls
+                .iter()
+                .skip(url_scroll)
+                .enumerate()
+                .take(max_items)
+            {
+                let row = 2 + i as u16;
+                term.move_to(row, 1)?;
+
+                let display_idx = url_scroll + i;
+                let line = format!("  [{}] {}", display_idx + 1, url);
+
+                if display_idx == self.url_cursor {
+                    term.set_selection()?;
+                }
+
+                term.write_truncated(&line, term.cols)?;
+                term.reset_attr()?;
+            }
+
+            // Status bar
+            term.move_to(term.rows, 1)?;
+            term.set_status()?;
+            let status = format!(
+                " {}/{} | 1-{}:open n/p:navigate RET:open Esc:cancel",
+                self.url_cursor + 1,
+                self.urls.len(),
+                self.urls.len()
+            );
+            term.write_truncated(&status, term.cols)?;
+            let remaining = (term.cols as usize).saturating_sub(status.len());
+            for _ in 0..remaining {
+                term.write_str(" ")?;
+            }
+            term.reset_attr()?;
+
+            return term.flush();
+        }
+
         if self.move_mode {
             term.move_to(1, 1)?;
             term.set_header()?;
@@ -760,7 +908,14 @@ impl View for EmailView {
         term.move_to(term.rows, 1)?;
         term.set_status()?;
         let total_lines = self.lines.len();
-        let base_status = if self.attachment_picking {
+        let base_status = if self.url_picking {
+            format!(
+                " line {}/{} | Open URL [1-{}] n/p:navigate RET:open or any key to cancel",
+                self.scroll + 1,
+                total_lines,
+                self.urls.len()
+            )
+        } else if self.attachment_picking {
             format!(
                 " line {}/{} | Pick attachment [1-{}] or any key to cancel",
                 self.scroll + 1,
@@ -780,12 +935,18 @@ impl View for EmailView {
                 ""
             };
             let expire_hint = if self.can_expire_now { " D:expire" } else { "" };
+            let url_hint = if !self.urls.is_empty() {
+                " b:links"
+            } else {
+                ""
+            };
             format!(
-                " line {}/{} | q:back n/j:down p/k:up r:reply R:reply-all F:forward{}{} a:archive d:delete m:move ?:help",
+                " line {}/{} | q:back n/j:down p/k:up r:reply R:reply-all F:forward{}{}{} a:archive d:delete m:move ?:help",
                 self.scroll + 1,
                 total_lines,
                 att_hint,
-                expire_hint
+                expire_hint,
+                url_hint
             )
         };
         let status = if let Some(ref msg) = self.status_message {
@@ -812,6 +973,36 @@ impl View for EmailView {
                 self.download_attachment(index);
             } else {
                 self.status_message = Some("Cancelled".to_string());
+            }
+            return ViewAction::Continue;
+        }
+
+        // URL picking mode
+        if self.url_picking {
+            self.url_picking = false;
+            match key {
+                Key::Char(c @ '1'..='9') => {
+                    let index = (c as usize) - ('1' as usize);
+                    self.open_url(index);
+                }
+                Key::Char('n') | Key::Char('j') | Key::Down => {
+                    if !self.urls.is_empty() && self.url_cursor + 1 < self.urls.len() {
+                        self.url_cursor += 1;
+                    }
+                    self.url_picking = true; // stay in picking mode
+                }
+                Key::Char('p') | Key::Char('k') | Key::Up => {
+                    if self.url_cursor > 0 {
+                        self.url_cursor -= 1;
+                    }
+                    self.url_picking = true; // stay in picking mode
+                }
+                Key::Enter => {
+                    self.open_url(self.url_cursor);
+                }
+                _ => {
+                    self.status_message = Some("Cancelled".to_string());
+                }
             }
             return ViewAction::Continue;
         }
@@ -1012,6 +1203,28 @@ impl View for EmailView {
                 self.rerender_lines();
                 ViewAction::Continue
             }
+            Key::Char('b') => {
+                if self.urls.is_empty() {
+                    self.status_message = Some("No URLs in this message".to_string());
+                } else if self.urls.len() == 1 {
+                    self.open_url(0);
+                } else {
+                    self.url_picking = true;
+                    self.url_cursor = 0;
+                    self.status_message = Some(format!(
+                        "Open URL [1-{}] or n/p to navigate, RET to open:",
+                        self.urls.len()
+                    ));
+                }
+                ViewAction::Continue
+            }
+            Key::Char(c @ '1'..='9') => {
+                let index = (c as usize) - ('1' as usize);
+                if index < self.urls.len() {
+                    self.open_url(index);
+                }
+                ViewAction::Continue
+            }
             Key::Char('?') => ViewAction::Push(Box::new(HelpView::new())),
             Key::ScrollUp => {
                 if self.scroll > 0 {
@@ -1048,13 +1261,14 @@ impl View for EmailView {
                         } else {
                             &empty
                         };
-                        let (lines, kinds) = Self::render_thread_emails(
+                        let (lines, kinds, urls) = Self::render_thread_emails(
                             &self.thread_emails,
                             cache,
                             self.prefer_html,
                         );
                         self.lines = lines;
                         self.line_kinds = kinds;
+                        self.urls = urls;
                         self.error = None;
                         // Mark all unread thread emails as read
                         let unread_ids: Vec<String> = emails
@@ -1088,9 +1302,10 @@ impl View for EmailView {
                         } else {
                             None
                         };
-                        let (lines, kinds) = Self::render_email(email, raw, self.prefer_html);
+                        let (lines, kinds, urls) = Self::render_email(email, raw, self.prefer_html);
                         self.lines = lines;
                         self.line_kinds = kinds;
+                        self.urls = urls;
                         self.email = Some(email.clone());
                         self.error = None;
                         self.pending_write_ops.clear();

@@ -62,6 +62,7 @@ pub struct Config {
 #[derive(Debug)]
 pub struct UiConfig {
     pub editor: Option<String>,
+    pub browser: Option<String>,
     pub page_size: u32,
     pub mouse: bool,
     pub sync_interval_secs: Option<u64>,
@@ -144,6 +145,8 @@ struct RawConfig {
 struct RawUiConfig {
     #[serde(default)]
     editor: Option<String>,
+    #[serde(default)]
+    browser: Option<String>,
     #[serde(default = "default_page_size")]
     page_size: u32,
     #[serde(default = "default_mouse")]
@@ -156,6 +159,7 @@ impl Default for RawUiConfig {
     fn default() -> Self {
         Self {
             editor: None,
+            browser: None,
             page_size: default_page_size(),
             mouse: default_mouse(),
             sync_interval_secs: default_sync_interval_secs(),
@@ -338,6 +342,7 @@ impl Config {
             theme,
             ui: UiConfig {
                 editor: raw.ui.editor,
+                browser: raw.ui.browser,
                 page_size: raw.ui.page_size,
                 mouse: raw.ui.mouse,
                 sync_interval_secs: if raw.ui.sync_interval_secs == 0 {
