@@ -652,33 +652,9 @@ fn backend_loop(
                     received_before
                 );
 
-                // Serve cached mailbox emails instantly (only for first page, no search/date filters)
-                if position == 0
-                    && search_query.is_none()
-                    && received_after.is_none()
-                    && received_before.is_none()
-                {
-                    if let Some(ref cache) = cache {
-                        if let Some(cached_emails) = cache.get_mailbox_emails(&mailbox_id) {
-                            if !cached_emails.is_empty() {
-                                log_info!(
-                                    "[Backend] Serving {} cached emails for mailbox '{}'",
-                                    cached_emails.len(),
-                                    mailbox_id
-                                );
-                                let loaded = cached_emails.len() as u32;
-                                let _ = resp_tx.send(BackendResponse::Emails {
-                                    mailbox_id: mailbox_id.clone(),
-                                    emails: Ok(cached_emails),
-                                    total: None,
-                                    position: 0,
-                                    loaded,
-                                    thread_counts: HashMap::new(),
-                                });
-                            }
-                        }
-                    }
-                }
+                // Do not pre-serve cached mailbox emails in online mode.
+                // Cached-first responses can briefly show stale rows ("ghost entries")
+                // before live JMAP data arrives.
 
                 let result = (|| {
                     let query = client
