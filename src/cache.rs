@@ -58,6 +58,28 @@ impl Cache {
         serde_json::from_slice(value.value()).ok()
     }
 
+    pub fn update_email_seen(&self, id: &str, seen: bool) {
+        if let Some(mut email) = self.get_email(id) {
+            if seen {
+                email.keywords.insert("$seen".to_string(), true);
+            } else {
+                email.keywords.remove("$seen");
+            }
+            self.put_emails(&[email]);
+        }
+    }
+
+    pub fn update_email_flagged(&self, id: &str, flagged: bool) {
+        if let Some(mut email) = self.get_email(id) {
+            if flagged {
+                email.keywords.insert("$flagged".to_string(), true);
+            } else {
+                email.keywords.remove("$flagged");
+            }
+            self.put_emails(&[email]);
+        }
+    }
+
     pub fn remove_email(&self, id: &str) {
         let txn = match self.db.begin_write() {
             Ok(t) => t,
@@ -476,5 +498,51 @@ mod tests {
         cache.clear();
         assert!(cache.get_email("e1").is_none());
         assert!(!cache.is_rules_processed("e1"));
+    }
+
+    #[test]
+    fn test_cache_update_email_seen() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CACHE_HOME", dir.path());
+        let cache = Cache::open("test_seen").unwrap();
+
+        let email = make_test_email("e1");
+        assert!(!email.keywords.contains_key("$seen"));
+        cache.put_emails(&[email]);
+
+        // Mark as seen
+        cache.update_email_seen("e1", true);
+        let cached = cache.get_email("e1").unwrap();
+        assert!(cached.keywords.contains_key("$seen"));
+
+        // Mark as unseen
+        cache.update_email_seen("e1", false);
+        let cached = cache.get_email("e1").unwrap();
+        assert!(!cached.keywords.contains_key("$seen"));
+
+        // No-op on missing email
+        cache.update_email_seen("nonexistent", true);
+        assert!(cache.get_email("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_cache_update_email_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CACHE_HOME", dir.path());
+        let cache = Cache::open("test_flagged").unwrap();
+
+        let email = make_test_email("e1");
+        assert!(!email.keywords.contains_key("$flagged"));
+        cache.put_emails(&[email]);
+
+        // Flag
+        cache.update_email_flagged("e1", true);
+        let cached = cache.get_email("e1").unwrap();
+        assert!(cached.keywords.contains_key("$flagged"));
+
+        // Unflag
+        cache.update_email_flagged("e1", false);
+        let cached = cache.get_email("e1").unwrap();
+        assert!(!cached.keywords.contains_key("$flagged"));
     }
 }

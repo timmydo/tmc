@@ -900,6 +900,11 @@ fn backend_loop(
                     log_warn!("Failed to mark email {} as read: {}", id, msg);
                     msg
                 });
+                if result.is_ok() {
+                    if let Some(ref cache) = cache {
+                        cache.update_email_seen(&id, true);
+                    }
+                }
                 let _ = resp_tx.send(BackendResponse::EmailMutation {
                     op_id,
                     id,
@@ -913,6 +918,11 @@ fn backend_loop(
                     log_warn!("Failed to mark email {} as unread: {}", id, msg);
                     msg
                 });
+                if result.is_ok() {
+                    if let Some(ref cache) = cache {
+                        cache.update_email_seen(&id, false);
+                    }
+                }
                 let _ = resp_tx.send(BackendResponse::EmailMutation {
                     op_id,
                     id,
@@ -926,6 +936,11 @@ fn backend_loop(
                     log_warn!("Failed to set email {} flagged={}: {}", id, flagged, msg);
                     msg
                 });
+                if result.is_ok() {
+                    if let Some(ref cache) = cache {
+                        cache.update_email_flagged(&id, flagged);
+                    }
+                }
                 let _ = resp_tx.send(BackendResponse::EmailMutation {
                     op_id,
                     id,
