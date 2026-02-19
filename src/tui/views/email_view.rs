@@ -565,7 +565,13 @@ impl EmailView {
             // Use shell to support complex browser commands with arguments.
             // The URL is shell-escaped with single quotes.
             let escaped_url = format!("'{}'", url.replace('\'', "'\\''"));
-            let shell_cmd = format!("{} {}", browser, escaped_url);
+            // If the browser command contains {url}, substitute it; otherwise append.
+            let shell_cmd = if browser.contains("{url}") {
+                browser.replace("{url}", &escaped_url)
+            } else {
+                format!("{} {}", browser, escaped_url)
+            };
+            crate::log_info!("[Browser] running: {}", shell_cmd);
             match std::process::Command::new("sh")
                 .arg("-c")
                 .arg(&shell_cmd)
@@ -578,6 +584,7 @@ impl EmailView {
                     self.status_message = Some(format!("Opening [{}]...", index + 1));
                 }
                 Err(e) => {
+                    crate::log_error!("[Browser] failed to run '{}': {}", shell_cmd, e);
                     self.status_message =
                         Some(format!("Failed to open browser '{}': {}", browser, e));
                 }
