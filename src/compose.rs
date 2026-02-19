@@ -7,7 +7,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Build a blank compose draft template.
 pub fn build_compose_draft(from: &str) -> String {
-    format!("From: {}\nTo: \nCc: \nSubject: \n\n", from)
+    format!(
+        "From: {}\nTo: \nCc: \nSubject: \n--text follows this line--\n\n",
+        from
+    )
 }
 
 /// Build a reply draft from an existing email.
@@ -129,6 +132,7 @@ pub fn build_reply_draft(email: &crate::jmap::types::Email, reply_all: bool, fro
     if let Some(ref refs) = references {
         draft.push_str(&format!("References: {}\n", refs));
     }
+    draft.push_str("--text follows this line--\n");
     draft.push_str(&format!(
         "\nOn {}, {} wrote:\n{}\n",
         date, sender_display, quoted
@@ -173,6 +177,7 @@ pub fn build_forward_draft(email: &crate::jmap::types::Email, from: &str) -> Str
 
     let mut draft = format!("From: {}\nTo: \nSubject: {}\n", from, subject);
 
+    draft.push_str("--text follows this line--\n");
     draft.push_str("\n---------- Forwarded message ----------\n");
     draft.push_str(&format!("From: {}\n", orig_from));
     draft.push_str(&format!("Date: {}\n", date));
@@ -330,6 +335,7 @@ mod tests {
         assert!(draft.contains("From: me@example.com"));
         assert!(draft.contains("To: \n"));
         assert!(draft.contains("Subject: \n"));
+        assert!(draft.contains("--text follows this line--"));
     }
 
     #[test]
