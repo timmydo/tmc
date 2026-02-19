@@ -403,7 +403,7 @@ impl JmapClient {
                     "accountId": self.account_id,
                     "filter": filter,
                     "sort": [{ "property": "receivedAt", "isAscending": false }],
-                    "collapseThreads": true,
+                    "collapseThreads": false,
                     "limit": limit,
                     "position": position
                 }),
