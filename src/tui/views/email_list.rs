@@ -1150,13 +1150,15 @@ impl View for EmailListView {
                 if let Some(pending) = self.pending_write_ops.remove(op_id) {
                     match result {
                         Ok(()) => match &pending {
-                            PendingWriteOp::Seen { .. } => {
-                                self.request_refresh("email_list.seen_mutation_followup");
+                            PendingWriteOp::Seen { .. } | PendingWriteOp::Flag { .. } => {
+                                // No refresh needed: optimistic update + cache
+                                // update already show the correct state. Refreshing
+                                // here would race with in-flight mutations and
+                                // overwrite optimistic state with stale server data.
                             }
                             PendingWriteOp::Move { .. } => {
                                 self.request_refresh("email_list.move_mutation_followup");
                             }
-                            _ => {}
                         },
                         Err(e) => {
                             self.rollback_pending_write(pending);
