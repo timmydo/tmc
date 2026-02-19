@@ -160,6 +160,12 @@ enum PendingWriteOp {
     Seen { old_seen: bool },
 }
 
+#[derive(Clone)]
+pub struct EmailNavEntry {
+    pub id: String,
+    pub unread: bool,
+}
+
 pub struct EmailView {
     cmd_tx: mpsc::Sender<BackendCommand>,
     reply_from_address: String,
@@ -193,6 +199,8 @@ pub struct EmailView {
     urls: Vec<String>,
     url_picking: bool,
     url_cursor: usize,
+    nav_entries: Vec<EmailNavEntry>,
+    nav_cursor: usize,
 }
 
 impl EmailView {
@@ -201,6 +209,8 @@ impl EmailView {
         cmd_tx: mpsc::Sender<BackendCommand>,
         reply_from_address: String,
         email_id: String,
+        nav_entries: Vec<EmailNavEntry>,
+        nav_cursor: usize,
         can_expire_now: bool,
         mailboxes: Vec<Mailbox>,
         archive_folder: String,
@@ -240,6 +250,8 @@ impl EmailView {
             urls: Vec::new(),
             url_picking: false,
             url_cursor: 0,
+            nav_entries,
+            nav_cursor,
         }
     }
 
@@ -291,7 +303,60 @@ impl EmailView {
             urls: Vec::new(),
             url_picking: false,
             url_cursor: 0,
+            nav_entries: Vec::new(),
+            nav_cursor: 0,
         }
+    }
+
+    fn set_nav_unread(&mut self, id: &str, unread: bool) {
+        if let Some(entry) = self.nav_entries.iter_mut().find(|e| e.id == id) {
+            entry.unread = unread;
+        }
+    }
+
+    fn navigate_unread(&mut self, forward: bool) -> bool {
+        if self.nav_entries.is_empty() {
+            return false;
+        }
+
+        let len = self.nav_entries.len();
+        if self.nav_cursor >= len {
+            self.nav_cursor = len - 1;
+        }
+
+        let mut candidate = None;
+        for offset in 1..=len {
+            let idx = if forward {
+                (self.nav_cursor + offset) % len
+            } else {
+                (self.nav_cursor + len - (offset % len)) % len
+            };
+            if self.nav_entries[idx].unread {
+                candidate = Some(idx);
+                break;
+            }
+        }
+
+        let Some(next_idx) = candidate else {
+            self.status_message = Some("No unread email".to_string());
+            return true;
+        };
+
+        self.nav_cursor = next_idx;
+        self.email_id = self.nav_entries[next_idx].id.clone();
+        self.loading = true;
+        self.error = None;
+        self.scroll = 0;
+        let _ = self.cmd_tx.send(BackendCommand::GetEmail {
+            id: self.email_id.clone(),
+        });
+        let op_id = self.next_op_id();
+        let _ = self.cmd_tx.send(BackendCommand::MarkEmailRead {
+            op_id,
+            id: self.email_id.clone(),
+        });
+        self.nav_entries[next_idx].unread = false;
+        true
     }
 
     fn render_headers(
@@ -623,7 +688,11 @@ impl EmailView {
     fn rollback_pending_write(&mut self, op: PendingWriteOp) {
         match op {
             PendingWriteOp::Flag { old_flagged } => self.set_flagged(old_flagged),
-            PendingWriteOp::Seen { old_seen } => self.set_seen(old_seen),
+            PendingWriteOp::Seen { old_seen } => {
+                self.set_seen(old_seen);
+                let id = self.email_id.clone();
+                self.set_nav_unread(&id, !old_seen);
+            }
         }
     }
 
@@ -953,7 +1022,7 @@ impl View for EmailView {
                 ""
             };
             format!(
-                " line {}/{} | q:back n/j:down p/k:up r:reply R:reply-all F:forward{}{}{} a:archive d:delete m:move ?:help",
+                " line {}/{} | q:back n/p:unread j/k:scroll r:reply R:reply-all F:forward{}{}{} a:archive d:delete m:move ?:help",
                 self.scroll + 1,
                 total_lines,
                 att_hint,
@@ -1051,13 +1120,25 @@ impl View for EmailView {
         let page = (term_rows as usize).saturating_sub(1);
         match key {
             Key::Char('q') => ViewAction::Pop,
-            Key::Char('n') | Key::Char('j') | Key::Down => {
+            Key::Char('n') => {
+                if !self.navigate_unread(true) && self.scroll + 1 < self.lines.len() {
+                    self.scroll += 1;
+                }
+                ViewAction::Continue
+            }
+            Key::Char('p') => {
+                if !self.navigate_unread(false) && self.scroll > 0 {
+                    self.scroll -= 1;
+                }
+                ViewAction::Continue
+            }
+            Key::Char('j') | Key::Down => {
                 if self.scroll + 1 < self.lines.len() {
                     self.scroll += 1;
                 }
                 ViewAction::Continue
             }
-            Key::Char('p') | Key::Char('k') | Key::Up => {
+            Key::Char('k') | Key::Up => {
                 if self.scroll > 0 {
                     self.scroll -= 1;
                 }
@@ -1122,6 +1203,8 @@ impl View for EmailView {
                     self.pending_write_ops
                         .insert(op_id, PendingWriteOp::Seen { old_seen });
                     self.set_seen(new_seen);
+                    let id = self.email_id.clone();
+                    self.set_nav_unread(&id, !new_seen);
                     let send_result = if new_seen {
                         self.cmd_tx.send(BackendCommand::MarkEmailRead {
                             op_id,
@@ -1309,6 +1392,10 @@ impl View for EmailView {
                 self.loading = false;
                 match result.as_ref() {
                     Ok(email) => {
+                        self.set_nav_unread(&email.id, !email.keywords.contains_key("$seen"));
+                        if let Some(idx) = self.nav_entries.iter().position(|e| e.id == email.id) {
+                            self.nav_cursor = idx;
+                        }
                         let raw = if self.show_all_headers {
                             self.raw_headers_cache.get(&email.id).map(|s| s.as_str())
                         } else {

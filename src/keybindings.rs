@@ -347,13 +347,25 @@ pub fn all_keybindings() -> Vec<KeyBinding> {
         },
         KeyBinding {
             view: "email_view",
-            key: "n/j/Down",
+            key: "n",
+            action: "next_unread",
+            description: "Open next unread email",
+        },
+        KeyBinding {
+            view: "email_view",
+            key: "p",
+            action: "prev_unread",
+            description: "Open previous unread email",
+        },
+        KeyBinding {
+            view: "email_view",
+            key: "j/Down",
             action: "scroll_down",
             description: "Scroll down",
         },
         KeyBinding {
             view: "email_view",
-            key: "p/k/Up",
+            key: "k/Up",
             action: "scroll_up",
             description: "Scroll up",
         },

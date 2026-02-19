@@ -4,7 +4,7 @@ use crate::jmap::types::{Email, Mailbox};
 use crate::rules;
 use crate::tui::input::Key;
 use crate::tui::screen::Terminal;
-use crate::tui::views::email_view::EmailView;
+use crate::tui::views::email_view::{EmailNavEntry, EmailView};
 use crate::tui::views::help::HelpView;
 use crate::tui::views::rules_preview::RulesPreviewView;
 use crate::tui::views::thread_view::ThreadView;
@@ -357,10 +357,20 @@ impl EmailListView {
         let email = self.emails.get(self.cursor)?;
         let email_id = email.id.clone();
         let was_seen = email.keywords.contains_key("$seen");
+        let nav_entries: Vec<EmailNavEntry> = self
+            .emails
+            .iter()
+            .map(|e| EmailNavEntry {
+                id: e.id.clone(),
+                unread: !e.keywords.contains_key("$seen"),
+            })
+            .collect();
         let view = EmailView::new(
             self.cmd_tx.clone(),
             self.reply_from_address.clone(),
             email_id.clone(),
+            nav_entries,
+            self.cursor,
             self.is_in_deleted_folder(),
             self.mailboxes.clone(),
             self.archive_folder.clone(),
