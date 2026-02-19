@@ -944,6 +944,7 @@ impl View for EmailListView {
                     let email_id = email.id.clone();
                     let old_seen = email.keywords.contains_key("$seen");
                     let new_seen = !old_seen;
+                    let marking_read = new_seen;
                     let op_id = self.next_op_id();
                     self.pending_write_ops.insert(
                         op_id,
@@ -971,6 +972,28 @@ impl View for EmailListView {
                             "Read state update",
                             e.to_string(),
                         );
+                    }
+                    // When marking as read, advance to the next unread email
+                    if marking_read {
+                        // Scan down (older items) first
+                        let mut found = false;
+                        for i in (self.cursor + 1)..self.emails.len() {
+                            if Self::is_unread(&self.emails[i]) {
+                                self.cursor = i;
+                                found = true;
+                                break;
+                            }
+                        }
+                        // If none found below, scan up (newer items)
+                        if !found {
+                            for i in (0..self.cursor).rev() {
+                                if Self::is_unread(&self.emails[i]) {
+                                    self.cursor = i;
+                                    break;
+                                }
+                            }
+                        }
+                        self.adjust_scroll(max_items);
                     }
                 }
                 ViewAction::Continue
@@ -1509,5 +1532,80 @@ mod tests {
 
         assert_eq!(view.total, Some(9), "total should decrement after delete");
         assert_eq!(view.emails.len(), 2, "email should be removed from list");
+    }
+
+    fn make_email_with_seen(id: &str, seen: bool) -> Email {
+        let mut email = make_email(id, &format!("thread-{}", id));
+        if seen {
+            email.keywords.insert("$seen".to_string(), true);
+        }
+        email
+    }
+
+    #[test]
+    fn mark_read_advances_to_next_unread_below() {
+        let (mut view, _cmd_rx) = make_view();
+        // Set up: [unread, read, unread, read, unread]
+        view.emails = vec![
+            make_email_with_seen("e1", false),
+            make_email_with_seen("e2", true),
+            make_email_with_seen("e3", false),
+            make_email_with_seen("e4", true),
+            make_email_with_seen("e5", false),
+        ];
+        view.cursor = 0;
+
+        // Mark e1 as read, should advance to e3 (next unread below)
+        view.handle_key(Key::Char('u'), 24);
+        assert_eq!(view.cursor, 2, "should advance to next unread below (e3)");
+    }
+
+    #[test]
+    fn mark_read_scans_up_when_no_unread_below() {
+        let (mut view, _cmd_rx) = make_view();
+        // Set up: [unread, read, unread, read]
+        view.emails = vec![
+            make_email_with_seen("e1", false),
+            make_email_with_seen("e2", true),
+            make_email_with_seen("e3", false),
+            make_email_with_seen("e4", true),
+        ];
+        view.cursor = 2;
+
+        // Mark e3 as read; no unread below, should scan up to e1
+        view.handle_key(Key::Char('u'), 24);
+        assert_eq!(view.cursor, 0, "should scan up to unread above (e1)");
+    }
+
+    #[test]
+    fn mark_read_stays_when_no_unread_anywhere() {
+        let (mut view, _cmd_rx) = make_view();
+        // Set up: [read, unread, read]
+        view.emails = vec![
+            make_email_with_seen("e1", true),
+            make_email_with_seen("e2", false),
+            make_email_with_seen("e3", true),
+        ];
+        view.cursor = 1;
+
+        // Mark e2 as read; no other unread emails, cursor stays
+        view.handle_key(Key::Char('u'), 24);
+        assert_eq!(view.cursor, 1, "should stay on same email when no unread");
+    }
+
+    #[test]
+    fn mark_unread_does_not_move_cursor() {
+        let (mut view, _cmd_rx) = make_view();
+        // Set up: [read, read, unread]
+        view.emails = vec![
+            make_email_with_seen("e1", true),
+            make_email_with_seen("e2", true),
+            make_email_with_seen("e3", false),
+        ];
+        view.cursor = 0;
+
+        // Mark e1 as unread (it's already read), cursor should not move
+        view.handle_key(Key::Char('u'), 24);
+        assert_eq!(view.cursor, 0, "marking unread should not move cursor");
     }
 }
