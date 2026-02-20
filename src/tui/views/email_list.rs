@@ -29,6 +29,16 @@ enum PendingWriteOp {
     },
 }
 
+#[derive(Clone)]
+pub struct CachedEmailListState {
+    pub emails: Vec<Email>,
+    pub total: Option<u32>,
+    pub next_query_position: u32,
+    pub last_loaded_count: u32,
+    pub thread_counts: HashMap<String, (usize, usize)>,
+    pub last_refreshed: SystemTime,
+}
+
 pub struct EmailListView {
     cmd_tx: mpsc::Sender<BackendCommand>,
     reply_from_address: String,
@@ -110,6 +120,23 @@ impl EmailListView {
             deleted_folder,
             browser,
             last_refreshed: None,
+        }
+    }
+
+    pub fn apply_cached_state(&mut self, state: &CachedEmailListState) {
+        self.emails = state.emails.clone();
+        self.total = state.total;
+        self.next_query_position = state.next_query_position;
+        self.last_loaded_count = state.last_loaded_count;
+        self.thread_counts = state.thread_counts.clone();
+        self.last_refreshed = Some(state.last_refreshed);
+        self.loading = false;
+        self.loading_more = false;
+        self.error = None;
+        self.pending_write_ops.clear();
+        self.scroll_offset = 0;
+        if self.cursor >= self.emails.len() && !self.emails.is_empty() {
+            self.cursor = self.emails.len() - 1;
         }
     }
 

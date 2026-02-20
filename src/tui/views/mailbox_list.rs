@@ -4,10 +4,11 @@ use crate::config::RetentionPolicyConfig;
 use crate::jmap::types::Mailbox;
 use crate::tui::input::Key;
 use crate::tui::screen::Terminal;
-use crate::tui::views::email_list::EmailListView;
+use crate::tui::views::email_list::{CachedEmailListState, EmailListView};
 use crate::tui::views::help::HelpView;
 use crate::tui::views::retention_preview::RetentionPreviewView;
 use crate::tui::views::{format_system_time, View, ViewAction};
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::mpsc;
 use std::time::SystemTime;
@@ -34,6 +35,8 @@ pub struct MailboxListView {
     create_input: String,
     delete_confirm_mode: bool,
     last_refreshed: Option<SystemTime>,
+    sync_interval_secs: Option<u64>,
+    email_cache: HashMap<String, CachedEmailListState>,
 }
 
 impl MailboxListView {
@@ -49,6 +52,7 @@ impl MailboxListView {
         archive_folder: String,
         deleted_folder: String,
         retention_policies: Vec<RetentionPolicyConfig>,
+        sync_interval_secs: Option<u64>,
     ) -> Self {
         MailboxListView {
             cmd_tx,
@@ -72,6 +76,8 @@ impl MailboxListView {
             create_input: String::new(),
             delete_confirm_mode: false,
             last_refreshed: None,
+            sync_interval_secs,
+            email_cache: HashMap::new(),
         }
     }
 
@@ -127,6 +133,58 @@ impl MailboxListView {
         } else {
             m.name.clone()
         }
+    }
+
+    fn is_cached_emails_fresh(&self, mailbox_id: &str) -> bool {
+        let Some(sync_interval_secs) = self.sync_interval_secs else {
+            return false;
+        };
+        let Some(cached) = self.email_cache.get(mailbox_id) else {
+            return false;
+        };
+        match SystemTime::now().duration_since(cached.last_refreshed) {
+            Ok(age) => age.as_secs() < sync_interval_secs,
+            Err(_) => false,
+        }
+    }
+
+    fn build_email_list_view(&self, mailbox: &Mailbox) -> EmailListView {
+        let reply_from = self
+            .reply_from_address
+            .clone()
+            .unwrap_or_else(|| self.from_address.clone());
+        let mut view = EmailListView::new(
+            self.cmd_tx.clone(),
+            reply_from,
+            mailbox.id.clone(),
+            mailbox.name.clone(),
+            self.page_size,
+            self.mailboxes.clone(),
+            self.archive_folder.clone(),
+            self.deleted_folder.clone(),
+            self.browser.clone(),
+        );
+        if self.is_cached_emails_fresh(&mailbox.id) {
+            if let Some(cached) = self.email_cache.get(&mailbox.id) {
+                view.apply_cached_state(cached);
+            }
+        }
+        view
+    }
+
+    fn maybe_query_on_open(&self, mailbox: &Mailbox, origin: &str) {
+        if self.is_cached_emails_fresh(&mailbox.id) {
+            return;
+        }
+        let _ = self.cmd_tx.send(BackendCommand::QueryEmails {
+            origin: origin.to_string(),
+            mailbox_id: mailbox.id.clone(),
+            page_size: self.page_size,
+            position: 0,
+            search_query: None,
+            received_after: None,
+            received_before: None,
+        });
     }
 }
 
@@ -362,31 +420,8 @@ impl View for MailboxListView {
             }
             Key::Enter => {
                 if let Some(mailbox) = self.mailboxes.get(self.cursor) {
-                    let reply_from = self
-                        .reply_from_address
-                        .clone()
-                        .unwrap_or_else(|| self.from_address.clone());
-                    let view = EmailListView::new(
-                        self.cmd_tx.clone(),
-                        reply_from,
-                        mailbox.id.clone(),
-                        mailbox.name.clone(),
-                        self.page_size,
-                        self.mailboxes.clone(),
-                        self.archive_folder.clone(),
-                        self.deleted_folder.clone(),
-                        self.browser.clone(),
-                    );
-                    // Send the query command
-                    let _ = self.cmd_tx.send(BackendCommand::QueryEmails {
-                        origin: "mailbox_list.open_enter".to_string(),
-                        mailbox_id: mailbox.id.clone(),
-                        page_size: self.page_size,
-                        position: 0,
-                        search_query: None,
-                        received_after: None,
-                        received_before: None,
-                    });
+                    let view = self.build_email_list_view(mailbox);
+                    self.maybe_query_on_open(mailbox, "mailbox_list.open_enter");
                     ViewAction::Push(Box::new(view))
                 } else {
                     ViewAction::Continue
@@ -492,30 +527,8 @@ impl View for MailboxListView {
         if self.pending_click {
             self.pending_click = false;
             if let Some(mailbox) = self.mailboxes.get(self.cursor) {
-                let reply_from = self
-                    .reply_from_address
-                    .clone()
-                    .unwrap_or_else(|| self.from_address.clone());
-                let view = EmailListView::new(
-                    self.cmd_tx.clone(),
-                    reply_from,
-                    mailbox.id.clone(),
-                    mailbox.name.clone(),
-                    self.page_size,
-                    self.mailboxes.clone(),
-                    self.archive_folder.clone(),
-                    self.deleted_folder.clone(),
-                    self.browser.clone(),
-                );
-                let _ = self.cmd_tx.send(BackendCommand::QueryEmails {
-                    origin: "mailbox_list.open_click".to_string(),
-                    mailbox_id: mailbox.id.clone(),
-                    page_size: self.page_size,
-                    position: 0,
-                    search_query: None,
-                    received_after: None,
-                    received_before: None,
-                });
+                let view = self.build_email_list_view(mailbox);
+                self.maybe_query_on_open(mailbox, "mailbox_list.open_click");
                 return Some(ViewAction::Push(Box::new(view)));
             }
         }
@@ -547,6 +560,51 @@ impl View for MailboxListView {
                     }
                 }
                 true
+            }
+            BackendResponse::Emails {
+                mailbox_id,
+                emails,
+                total,
+                position,
+                loaded,
+                thread_counts,
+            } => {
+                if let Ok(emails) = emails {
+                    let now = SystemTime::now();
+                    let entry = self
+                        .email_cache
+                        .entry(mailbox_id.clone())
+                        .or_insert_with(|| CachedEmailListState {
+                            emails: Vec::new(),
+                            total: None,
+                            next_query_position: 0,
+                            last_loaded_count: 0,
+                            thread_counts: HashMap::new(),
+                            last_refreshed: now,
+                        });
+
+                    if *position == 0 {
+                        entry.emails = emails.clone();
+                        entry.thread_counts = thread_counts.clone();
+                    } else {
+                        entry
+                            .thread_counts
+                            .extend(thread_counts.iter().map(|(k, v)| (k.clone(), *v)));
+                        let mut existing_ids: HashSet<String> =
+                            entry.emails.iter().map(|e| e.id.clone()).collect();
+                        for email in emails {
+                            if existing_ids.insert(email.id.clone()) {
+                                entry.emails.push(email.clone());
+                            }
+                        }
+                    }
+
+                    entry.total = *total;
+                    entry.last_loaded_count = *loaded;
+                    entry.next_query_position = position.saturating_add(*loaded);
+                    entry.last_refreshed = now;
+                }
+                false
             }
             BackendResponse::RetentionPreview { result } => {
                 match result {

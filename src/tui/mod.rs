@@ -84,6 +84,7 @@ pub fn run(
         archive_folder.clone(),
         deleted_folder.clone(),
         retention_policies.clone(),
+        sync_interval_secs,
     );
     let _ = cmd_tx.send(BackendCommand::FetchMailboxes {
         origin: "startup".to_string(),
@@ -227,6 +228,7 @@ pub fn run(
                                     archive_folder.clone(),
                                     deleted_folder.clone(),
                                     retention_policies.clone(),
+                                    sync_interval_secs,
                                 );
                                 let _ = cmd_tx.send(BackendCommand::FetchMailboxes {
                                     origin: "switch_account".to_string(),
