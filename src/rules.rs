@@ -584,6 +584,7 @@ pub fn resolve_mailbox_id(name: &str, mailboxes: &[Mailbox]) -> Option<String> {
 
 /// Execute rule applications against the JMAP server.
 /// Returns the set of email IDs that were moved or deleted (removed from current mailbox).
+#[allow(dead_code)]
 pub fn execute_rule_actions(
     applications: &[RuleApplication],
     mailboxes: &[Mailbox],
