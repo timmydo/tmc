@@ -81,6 +81,19 @@ impl MailboxListView {
         }
     }
 
+    fn is_cached_emails_fresh(&self, mailbox_id: &str) -> bool {
+        let Some(sync_interval_secs) = self.sync_interval_secs else {
+            return false;
+        };
+        let Some(cached) = self.email_cache.get(mailbox_id) else {
+            return false;
+        };
+        match SystemTime::now().duration_since(cached.last_refreshed) {
+            Ok(age) => age.as_secs() < sync_interval_secs,
+            Err(_) => false,
+        }
+    }
+
     fn request_refresh(&mut self, origin: &str) {
         self.loading = true;
         let _ = self.cmd_tx.send(BackendCommand::FetchMailboxes {
@@ -135,19 +148,6 @@ impl MailboxListView {
         }
     }
 
-    fn is_cached_emails_fresh(&self, mailbox_id: &str) -> bool {
-        let Some(sync_interval_secs) = self.sync_interval_secs else {
-            return false;
-        };
-        let Some(cached) = self.email_cache.get(mailbox_id) else {
-            return false;
-        };
-        match SystemTime::now().duration_since(cached.last_refreshed) {
-            Ok(age) => age.as_secs() < sync_interval_secs,
-            Err(_) => false,
-        }
-    }
-
     fn build_email_list_view(&self, mailbox: &Mailbox) -> EmailListView {
         let reply_from = self
             .reply_from_address
@@ -164,15 +164,16 @@ impl MailboxListView {
             self.deleted_folder.clone(),
             self.browser.clone(),
         );
-        if self.is_cached_emails_fresh(&mailbox.id) {
-            if let Some(cached) = self.email_cache.get(&mailbox.id) {
-                view.apply_cached_state(cached);
-            }
+        // Always hydrate from any cached snapshot we have, even if stale.
+        // Freshness only controls whether we skip a background refresh.
+        if let Some(cached) = self.email_cache.get(&mailbox.id) {
+            view.apply_cached_state(cached);
         }
         view
     }
 
     fn maybe_query_on_open(&self, mailbox: &Mailbox, origin: &str) {
+        // Query only on cold miss or stale snapshot.
         if self.is_cached_emails_fresh(&mailbox.id) {
             return;
         }

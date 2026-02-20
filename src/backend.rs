@@ -4,6 +4,7 @@ use crate::jmap::client::JmapClient;
 use crate::jmap::types::{Email, Mailbox};
 use crate::rules::{self, CompiledRule};
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -234,6 +235,137 @@ pub enum EmailMutationAction {
     Destroy,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum QueuedMutation {
+    MarkRead {
+        op_id: u64,
+        id: String,
+    },
+    MarkUnread {
+        op_id: u64,
+        id: String,
+    },
+    SetFlagged {
+        op_id: u64,
+        id: String,
+        flagged: bool,
+    },
+    MoveEmail {
+        op_id: u64,
+        id: String,
+        to_mailbox_id: String,
+    },
+    MoveThread {
+        op_id: u64,
+        thread_id: String,
+        to_mailbox_id: String,
+    },
+    DestroyEmail {
+        op_id: u64,
+        id: String,
+    },
+    DestroyThread {
+        op_id: u64,
+        thread_id: String,
+    },
+    MarkMailboxRead {
+        mailbox_id: String,
+        mailbox_name: String,
+    },
+    RunRulesForMailbox {
+        mailbox_id: String,
+    },
+    ExecuteRetentionExpiry {
+        policies: Vec<RetentionPolicySnapshot>,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RetentionPolicySnapshot {
+    name: String,
+    folder: String,
+    days: u32,
+}
+
+impl From<&RetentionPolicyConfig> for RetentionPolicySnapshot {
+    fn from(value: &RetentionPolicyConfig) -> Self {
+        Self {
+            name: value.name.clone(),
+            folder: value.folder.clone(),
+            days: value.days,
+        }
+    }
+}
+
+impl From<&RetentionPolicySnapshot> for RetentionPolicyConfig {
+    fn from(value: &RetentionPolicySnapshot) -> Self {
+        Self {
+            name: value.name.clone(),
+            folder: value.folder.clone(),
+            days: value.days,
+        }
+    }
+}
+
+fn queue_mutation(cache: Option<&Cache>, op: &QueuedMutation) -> Result<u64, String> {
+    let cache = cache.ok_or_else(|| "cache unavailable (offline mode)".to_string())?;
+    let payload = serde_json::to_vec(op).map_err(|e| format!("serialize queue op: {}", e))?;
+    cache.enqueue_operation(&payload)
+}
+
+fn apply_local_mutation(cache: Option<&Cache>, op: &QueuedMutation) {
+    let Some(cache) = cache else {
+        return;
+    };
+    match op {
+        QueuedMutation::MarkRead { id, .. } => {
+            let _ = cache.apply_mark_seen(id, true);
+        }
+        QueuedMutation::MarkUnread { id, .. } => {
+            let _ = cache.apply_mark_seen(id, false);
+        }
+        QueuedMutation::SetFlagged { id, flagged, .. } => {
+            let _ = cache.apply_set_flagged(id, *flagged);
+        }
+        QueuedMutation::MoveEmail {
+            id, to_mailbox_id, ..
+        } => {
+            let _ = cache.apply_move_email(id, to_mailbox_id);
+        }
+        QueuedMutation::MoveThread {
+            thread_id,
+            to_mailbox_id,
+            ..
+        } => {
+            for email in cache.get_thread_emails(thread_id) {
+                let _ = cache.apply_move_email(&email.id, to_mailbox_id);
+            }
+        }
+        QueuedMutation::DestroyEmail { id, .. } => {
+            let _ = cache.apply_destroy_email(id);
+        }
+        QueuedMutation::DestroyThread { thread_id, .. } => {
+            for email in cache.get_thread_emails(thread_id) {
+                let _ = cache.apply_destroy_email(&email.id);
+            }
+        }
+        QueuedMutation::MarkMailboxRead { mailbox_id, .. } => {
+            let _ = cache.apply_mark_mailbox_read(mailbox_id);
+        }
+        QueuedMutation::RunRulesForMailbox { .. }
+        | QueuedMutation::ExecuteRetentionExpiry { .. } => {}
+    }
+}
+
+fn is_missing_remote_error(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("not found")
+        || lower.contains("notfound")
+        || lower.contains("unknown")
+        || lower.contains("invalid email id")
+}
+
 /// Spawn the backend thread. Returns the command sender and response receiver.
 pub fn spawn(
     client: Option<JmapClient>,
@@ -405,67 +537,125 @@ fn handle_offline_command(
         BackendCommand::Shutdown => {
             return false;
         }
-        // All mutations and network-only commands
+        // Offline mutations: queue and apply local projection.
         BackendCommand::MarkEmailRead { op_id, id, .. } => {
+            let op = QueuedMutation::MarkRead {
+                op_id: *op_id,
+                id: id.clone(),
+            };
+            let result = queue_mutation(cache.as_ref(), &op).map(|_| {
+                apply_local_mutation(cache.as_ref(), &op);
+            });
             let _ = resp_tx.send(BackendResponse::EmailMutation {
                 op_id: *op_id,
                 id: id.clone(),
                 action: EmailMutationAction::MarkRead,
-                result: Err("not available in offline mode".to_string()),
+                result: result.map(|_| ()),
             });
         }
         BackendCommand::MarkEmailUnread { op_id, id, .. } => {
+            let op = QueuedMutation::MarkUnread {
+                op_id: *op_id,
+                id: id.clone(),
+            };
+            let result = queue_mutation(cache.as_ref(), &op).map(|_| {
+                apply_local_mutation(cache.as_ref(), &op);
+            });
             let _ = resp_tx.send(BackendResponse::EmailMutation {
                 op_id: *op_id,
                 id: id.clone(),
                 action: EmailMutationAction::MarkUnread,
-                result: Err("not available in offline mode".to_string()),
+                result: result.map(|_| ()),
             });
         }
         BackendCommand::SetEmailFlagged {
             op_id, id, flagged, ..
         } => {
+            let op = QueuedMutation::SetFlagged {
+                op_id: *op_id,
+                id: id.clone(),
+                flagged: *flagged,
+            };
+            let result = queue_mutation(cache.as_ref(), &op).map(|_| {
+                apply_local_mutation(cache.as_ref(), &op);
+            });
             let _ = resp_tx.send(BackendResponse::EmailMutation {
                 op_id: *op_id,
                 id: id.clone(),
                 action: EmailMutationAction::SetFlagged(*flagged),
-                result: Err("not available in offline mode".to_string()),
+                result: result.map(|_| ()),
             });
         }
-        BackendCommand::MoveEmail { op_id, id, .. } => {
+        BackendCommand::MoveEmail {
+            op_id,
+            id,
+            to_mailbox_id,
+        } => {
+            let op = QueuedMutation::MoveEmail {
+                op_id: *op_id,
+                id: id.clone(),
+                to_mailbox_id: to_mailbox_id.clone(),
+            };
+            let result = queue_mutation(cache.as_ref(), &op).map(|_| {
+                apply_local_mutation(cache.as_ref(), &op);
+            });
             let _ = resp_tx.send(BackendResponse::EmailMutation {
                 op_id: *op_id,
                 id: id.clone(),
                 action: EmailMutationAction::Move,
-                result: Err("not available in offline mode".to_string()),
+                result: result.map(|_| ()),
             });
         }
         BackendCommand::MoveThread {
-            op_id, thread_id, ..
+            op_id,
+            thread_id,
+            to_mailbox_id,
         } => {
+            let op = QueuedMutation::MoveThread {
+                op_id: *op_id,
+                thread_id: thread_id.clone(),
+                to_mailbox_id: to_mailbox_id.clone(),
+            };
+            let result = queue_mutation(cache.as_ref(), &op).map(|_| {
+                apply_local_mutation(cache.as_ref(), &op);
+            });
             let _ = resp_tx.send(BackendResponse::EmailMutation {
                 op_id: *op_id,
                 id: thread_id.clone(),
                 action: EmailMutationAction::Move,
-                result: Err("not available in offline mode".to_string()),
+                result: result.map(|_| ()),
             });
         }
         BackendCommand::DestroyEmail { op_id, id, .. } => {
+            let op = QueuedMutation::DestroyEmail {
+                op_id: *op_id,
+                id: id.clone(),
+            };
+            let result = queue_mutation(cache.as_ref(), &op).map(|_| {
+                apply_local_mutation(cache.as_ref(), &op);
+            });
             let _ = resp_tx.send(BackendResponse::EmailMutation {
                 op_id: *op_id,
                 id: id.clone(),
                 action: EmailMutationAction::Destroy,
-                result: Err("not available in offline mode".to_string()),
+                result: result.map(|_| ()),
             });
         }
         BackendCommand::DestroyThread {
             op_id, thread_id, ..
         } => {
+            let op = QueuedMutation::DestroyThread {
+                op_id: *op_id,
+                thread_id: thread_id.clone(),
+            };
+            let result = queue_mutation(cache.as_ref(), &op).map(|_| {
+                apply_local_mutation(cache.as_ref(), &op);
+            });
             let _ = resp_tx.send(BackendResponse::EmailMutation {
                 op_id: *op_id,
                 id: thread_id.clone(),
                 action: EmailMutationAction::Destroy,
-                result: Err("not available in offline mode".to_string()),
+                result: result.map(|_| ()),
             });
         }
         BackendCommand::CreateMailbox { name } => {
@@ -481,9 +671,14 @@ fn handle_offline_command(
             });
         }
         BackendCommand::QueryThreadEmails { thread_id } => {
+            let result = if let Some(cache) = cache {
+                Ok(cache.get_thread_emails(thread_id))
+            } else {
+                Err("cache unavailable (offline mode)".to_string())
+            };
             let _ = resp_tx.send(BackendResponse::ThreadEmails {
                 thread_id: thread_id.clone(),
-                emails: Err("not available in offline mode".to_string()),
+                emails: result,
             });
         }
         BackendCommand::MarkThreadRead { thread_id, .. } => {
@@ -496,11 +691,21 @@ fn handle_offline_command(
             mailbox_id,
             mailbox_name,
         } => {
+            let op = QueuedMutation::MarkMailboxRead {
+                mailbox_id: mailbox_id.clone(),
+                mailbox_name: mailbox_name.clone(),
+            };
+            let local_updated = if let Some(cache) = cache.as_ref() {
+                cache.apply_mark_mailbox_read(mailbox_id)
+            } else {
+                0
+            };
+            let result = queue_mutation(cache.as_ref(), &op).map(|_| ());
             let _ = resp_tx.send(BackendResponse::MailboxMarkedRead {
                 mailbox_id: mailbox_id.clone(),
                 mailbox_name: mailbox_name.clone(),
-                updated: 0,
-                result: Err("not available in offline mode".to_string()),
+                updated: local_updated,
+                result,
             });
         }
         BackendCommand::GetEmailRawHeaders { id } => {
@@ -520,9 +725,16 @@ fn handle_offline_command(
                 result: Err("not available in offline mode".to_string()),
             });
         }
-        BackendCommand::ExecuteRetentionExpiry { .. } => {
+        BackendCommand::ExecuteRetentionExpiry { policies } => {
+            let op = QueuedMutation::ExecuteRetentionExpiry {
+                policies: policies.iter().map(RetentionPolicySnapshot::from).collect(),
+            };
+            let result = queue_mutation(cache.as_ref(), &op).map(|_| ());
             let _ = resp_tx.send(BackendResponse::RetentionExecuted {
-                result: Err("not available in offline mode".to_string()),
+                result: result.map(|_| RetentionExecutionResult {
+                    deleted: 0,
+                    failed_batches: Vec::new(),
+                }),
             });
         }
         BackendCommand::PreviewRulesForMailbox {
@@ -541,14 +753,176 @@ fn handle_offline_command(
             mailbox_name,
             ..
         } => {
+            let op = QueuedMutation::RunRulesForMailbox {
+                mailbox_id: mailbox_id.clone(),
+            };
+            let result = queue_mutation(cache.as_ref(), &op).map(|_| ());
             let _ = resp_tx.send(BackendResponse::RulesRun {
                 mailbox_id: mailbox_id.clone(),
                 mailbox_name: mailbox_name.clone(),
-                result: Err("not available in offline mode".to_string()),
+                result: result.map(|_| RulesRunResult {
+                    scanned: 0,
+                    matched_rules: 0,
+                    actions: 0,
+                }),
             });
         }
     }
     true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_remote_mutation(
+    client: &JmapClient,
+    op: &QueuedMutation,
+    cached_mailboxes: &mut Vec<Mailbox>,
+    rules: &[CompiledRule],
+    custom_headers: &[String],
+    my_email_regex: &Regex,
+    cache: Option<&Cache>,
+) -> Result<(), String> {
+    match op {
+        QueuedMutation::MarkRead { id, .. } => {
+            client.mark_email_read(id).map_err(|e| e.to_string())
+        }
+        QueuedMutation::MarkUnread { id, .. } => {
+            client.mark_email_unread(id).map_err(|e| e.to_string())
+        }
+        QueuedMutation::SetFlagged { id, flagged, .. } => client
+            .set_email_flagged(id, *flagged)
+            .map_err(|e| e.to_string()),
+        QueuedMutation::MoveEmail {
+            id, to_mailbox_id, ..
+        } => client
+            .move_email(id, to_mailbox_id)
+            .map_err(|e| e.to_string()),
+        QueuedMutation::MoveThread {
+            thread_id,
+            to_mailbox_id,
+            ..
+        } => {
+            let emails = client
+                .query_thread_emails(thread_id)
+                .map_err(|e| e.to_string())?;
+            for email in emails {
+                client
+                    .move_email(&email.id, to_mailbox_id)
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        }
+        QueuedMutation::DestroyEmail { id, .. } => client
+            .destroy_emails(std::slice::from_ref(id))
+            .map_err(|e| e.to_string()),
+        QueuedMutation::DestroyThread { thread_id, .. } => {
+            let emails = client
+                .query_thread_emails(thread_id)
+                .map_err(|e| e.to_string())?;
+            let ids: Vec<String> = emails.into_iter().map(|e| e.id).collect();
+            client.destroy_emails(&ids).map_err(|e| e.to_string())
+        }
+        QueuedMutation::MarkMailboxRead { mailbox_id, .. } => {
+            let ids = fetch_all_mailbox_email_ids(client, mailbox_id)?;
+            if ids.is_empty() {
+                Ok(())
+            } else {
+                client.mark_emails_read(&ids).map_err(|e| e.to_string())
+            }
+        }
+        QueuedMutation::RunRulesForMailbox { mailbox_id } => {
+            run_rules_for_mailbox(
+                client,
+                cached_mailboxes,
+                rules,
+                custom_headers,
+                my_email_regex,
+                mailbox_id,
+                cache,
+            )?;
+            Ok(())
+        }
+        QueuedMutation::ExecuteRetentionExpiry { policies } => {
+            let policies: Vec<RetentionPolicyConfig> =
+                policies.iter().map(RetentionPolicyConfig::from).collect();
+            execute_retention_expiry(client, cached_mailboxes, &policies)?;
+            Ok(())
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replay_queued_mutations(
+    client: &JmapClient,
+    cached_mailboxes: &mut Vec<Mailbox>,
+    rules: &[CompiledRule],
+    custom_headers: &[String],
+    my_email_regex: &Regex,
+    cache: &Cache,
+) {
+    let queued = cache.queued_operations();
+    if queued.is_empty() {
+        return;
+    }
+    log_info!(
+        "[Backend] Replaying {} queued offline operation(s)",
+        queued.len()
+    );
+
+    for (seq, payload) in queued {
+        let op: QueuedMutation = match serde_json::from_slice(&payload) {
+            Ok(op) => op,
+            Err(e) => {
+                log_warn!(
+                    "[Backend] dropping malformed queued op seq={} parse error={}",
+                    seq,
+                    e
+                );
+                let _ = cache.remove_queued_operation(seq);
+                continue;
+            }
+        };
+
+        let result = execute_remote_mutation(
+            client,
+            &op,
+            cached_mailboxes,
+            rules,
+            custom_headers,
+            my_email_regex,
+            Some(cache),
+        );
+
+        match result {
+            Ok(()) => {
+                let _ = cache.remove_queued_operation(seq);
+            }
+            Err(e) => {
+                let resolved = matches!(
+                    op,
+                    QueuedMutation::MoveEmail { .. }
+                        | QueuedMutation::MoveThread { .. }
+                        | QueuedMutation::DestroyEmail { .. }
+                        | QueuedMutation::DestroyThread { .. }
+                ) && is_missing_remote_error(&e);
+                if resolved {
+                    log_info!(
+                        "[Backend] queue op seq={} resolved by conflict policy: {}",
+                        seq,
+                        e
+                    );
+                    let _ = cache.remove_queued_operation(seq);
+                    continue;
+                }
+                log_warn!(
+                    "[Backend] queue replay stopped at seq={} kind={:?}: {}",
+                    seq,
+                    op,
+                    e
+                );
+                break;
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -565,6 +939,23 @@ fn backend_loop(
     let mut cached_mailboxes: Vec<Mailbox> = Vec::new();
     let mut command_seq: u64 = 0;
     let offline = client.is_none();
+    if let Some(cache) = cache.as_ref() {
+        if let Some(mboxes) = cache.get_mailboxes() {
+            cached_mailboxes = mboxes;
+        }
+    }
+    if !offline {
+        if let (Some(client), Some(cache)) = (client.as_ref(), cache.as_ref()) {
+            replay_queued_mutations(
+                client,
+                &mut cached_mailboxes,
+                &rules,
+                &custom_headers,
+                &my_email_regex,
+                cache,
+            );
+        }
+    }
 
     while let Ok(cmd) = cmd_rx.recv() {
         command_seq = command_seq.wrapping_add(1);
@@ -618,6 +1009,9 @@ fn backend_loop(
                 if result.is_ok() {
                     if let Ok(mailboxes) = client.get_mailboxes() {
                         cached_mailboxes = mailboxes;
+                        if let Some(ref cache) = cache {
+                            cache.put_mailboxes(&cached_mailboxes);
+                        }
                     }
                 }
                 let _ = resp_tx.send(BackendResponse::MailboxCreated { name, result });
@@ -627,6 +1021,9 @@ fn backend_loop(
                 if result.is_ok() {
                     if let Ok(mailboxes) = client.get_mailboxes() {
                         cached_mailboxes = mailboxes;
+                        if let Some(ref cache) = cache {
+                            cache.put_mailboxes(&cached_mailboxes);
+                        }
                     }
                 }
                 let _ = resp_tx.send(BackendResponse::MailboxDeleted { name, result });
@@ -652,9 +1049,32 @@ fn backend_loop(
                     received_before
                 );
 
-                // Do not pre-serve cached mailbox emails in online mode.
-                // Cached-first responses can briefly show stale rows ("ghost entries")
-                // before live JMAP data arrives.
+                // For TUI open flows, serve cached mailbox emails immediately so
+                // folder open is instant. CLI expects one response per command.
+                let can_serve_cached_first = !origin.starts_with("cli")
+                    && position == 0
+                    && search_query.is_none()
+                    && received_after.is_none()
+                    && received_before.is_none();
+                if can_serve_cached_first {
+                    if let Some(ref cache) = cache {
+                        if let Some(cached_emails) = cache.get_mailbox_emails(&mailbox_id) {
+                            let cached_total = cached_mailboxes
+                                .iter()
+                                .find(|m| m.id == mailbox_id)
+                                .map(|m| m.total_emails);
+                            let cached_loaded = cached_emails.len() as u32;
+                            let _ = resp_tx.send(BackendResponse::Emails {
+                                mailbox_id: mailbox_id.clone(),
+                                emails: Ok(cached_emails),
+                                total: cached_total,
+                                position: 0,
+                                loaded: cached_loaded,
+                                thread_counts: HashMap::new(),
+                            });
+                        }
+                    }
+                }
 
                 let result = (|| {
                     let query = client
@@ -871,15 +1291,25 @@ fn backend_loop(
                 });
             }
             BackendCommand::MarkEmailRead { op_id, id } => {
-                let result = client.mark_email_read(&id).map_err(|e| {
-                    let msg = e.to_string();
+                let op = QueuedMutation::MarkRead {
+                    op_id,
+                    id: id.clone(),
+                };
+                let result = execute_remote_mutation(
+                    client,
+                    &op,
+                    &mut cached_mailboxes,
+                    &rules,
+                    &custom_headers,
+                    &my_email_regex,
+                    cache.as_ref(),
+                )
+                .map_err(|msg| {
                     log_warn!("Failed to mark email {} as read: {}", id, msg);
                     msg
                 });
                 if result.is_ok() {
-                    if let Some(ref cache) = cache {
-                        cache.update_email_seen(&id, true);
-                    }
+                    apply_local_mutation(cache.as_ref(), &op);
                 }
                 let _ = resp_tx.send(BackendResponse::EmailMutation {
                     op_id,
@@ -889,15 +1319,26 @@ fn backend_loop(
                 });
             }
             BackendCommand::MarkEmailUnread { op_id, id } => {
-                let result = client.mark_email_unread(&id).map_err(|e| {
-                    let msg = e.to_string();
+                let op = QueuedMutation::MarkUnread {
+                    op_id,
+                    id: id.clone(),
+                };
+                let result = execute_remote_mutation(
+                    client,
+                    &op,
+                    &mut cached_mailboxes,
+                    &rules,
+                    &custom_headers,
+                    &my_email_regex,
+                    cache.as_ref(),
+                )
+                .map_err(|msg| {
+                    let msg = msg.to_string();
                     log_warn!("Failed to mark email {} as unread: {}", id, msg);
                     msg
                 });
                 if result.is_ok() {
-                    if let Some(ref cache) = cache {
-                        cache.update_email_seen(&id, false);
-                    }
+                    apply_local_mutation(cache.as_ref(), &op);
                 }
                 let _ = resp_tx.send(BackendResponse::EmailMutation {
                     op_id,
@@ -907,15 +1348,27 @@ fn backend_loop(
                 });
             }
             BackendCommand::SetEmailFlagged { op_id, id, flagged } => {
-                let result = client.set_email_flagged(&id, flagged).map_err(|e| {
-                    let msg = e.to_string();
+                let op = QueuedMutation::SetFlagged {
+                    op_id,
+                    id: id.clone(),
+                    flagged,
+                };
+                let result = execute_remote_mutation(
+                    client,
+                    &op,
+                    &mut cached_mailboxes,
+                    &rules,
+                    &custom_headers,
+                    &my_email_regex,
+                    cache.as_ref(),
+                )
+                .map_err(|msg| {
+                    let msg = msg.to_string();
                     log_warn!("Failed to set email {} flagged={}: {}", id, flagged, msg);
                     msg
                 });
                 if result.is_ok() {
-                    if let Some(ref cache) = cache {
-                        cache.update_email_flagged(&id, flagged);
-                    }
+                    apply_local_mutation(cache.as_ref(), &op);
                 }
                 let _ = resp_tx.send(BackendResponse::EmailMutation {
                     op_id,
@@ -929,15 +1382,27 @@ fn backend_loop(
                 id,
                 to_mailbox_id,
             } => {
-                let result = client.move_email(&id, &to_mailbox_id).map_err(|e| {
-                    let msg = e.to_string();
+                let op = QueuedMutation::MoveEmail {
+                    op_id,
+                    id: id.clone(),
+                    to_mailbox_id: to_mailbox_id.clone(),
+                };
+                let result = execute_remote_mutation(
+                    client,
+                    &op,
+                    &mut cached_mailboxes,
+                    &rules,
+                    &custom_headers,
+                    &my_email_regex,
+                    cache.as_ref(),
+                )
+                .map_err(|msg| {
+                    let msg = msg.to_string();
                     log_warn!("Failed to move email {}: {}", id, msg);
                     msg
                 });
                 if result.is_ok() {
-                    if let Some(ref cache) = cache {
-                        cache.remove_email(&id);
-                    }
+                    apply_local_mutation(cache.as_ref(), &op);
                 }
                 let _ = resp_tx.send(BackendResponse::EmailMutation {
                     op_id,
@@ -951,21 +1416,27 @@ fn backend_loop(
                 thread_id,
                 to_mailbox_id,
             } => {
-                let result = (|| {
-                    let emails = client
-                        .query_thread_emails(&thread_id)
-                        .map_err(|e| e.to_string())?;
-                    for email in emails {
-                        client
-                            .move_email(&email.id, &to_mailbox_id)
-                            .map_err(|e| e.to_string())?;
-                    }
-                    Ok(())
-                })()
+                let op = QueuedMutation::MoveThread {
+                    op_id,
+                    thread_id: thread_id.clone(),
+                    to_mailbox_id,
+                };
+                let result = execute_remote_mutation(
+                    client,
+                    &op,
+                    &mut cached_mailboxes,
+                    &rules,
+                    &custom_headers,
+                    &my_email_regex,
+                    cache.as_ref(),
+                )
                 .map_err(|msg| {
                     log_warn!("Failed to move thread {}: {}", thread_id, msg);
                     msg
                 });
+                if result.is_ok() {
+                    apply_local_mutation(cache.as_ref(), &op);
+                }
                 let _ = resp_tx.send(BackendResponse::EmailMutation {
                     op_id,
                     id: thread_id,
@@ -974,12 +1445,27 @@ fn backend_loop(
                 });
             }
             BackendCommand::DestroyEmail { op_id, id } => {
-                let ids = vec![id.clone()];
-                let result = client.destroy_emails(&ids).map_err(|e| {
-                    let msg = e.to_string();
+                let op = QueuedMutation::DestroyEmail {
+                    op_id,
+                    id: id.clone(),
+                };
+                let result = execute_remote_mutation(
+                    client,
+                    &op,
+                    &mut cached_mailboxes,
+                    &rules,
+                    &custom_headers,
+                    &my_email_regex,
+                    cache.as_ref(),
+                )
+                .map_err(|msg| {
+                    let msg = msg.to_string();
                     log_warn!("Failed to destroy email {}: {}", id, msg);
                     msg
                 });
+                if result.is_ok() {
+                    apply_local_mutation(cache.as_ref(), &op);
+                }
                 let _ = resp_tx.send(BackendResponse::EmailMutation {
                     op_id,
                     id,
@@ -988,17 +1474,26 @@ fn backend_loop(
                 });
             }
             BackendCommand::DestroyThread { op_id, thread_id } => {
-                let result = (|| {
-                    let emails = client
-                        .query_thread_emails(&thread_id)
-                        .map_err(|e| e.to_string())?;
-                    let ids: Vec<String> = emails.into_iter().map(|e| e.id).collect();
-                    client.destroy_emails(&ids).map_err(|e| e.to_string())
-                })()
+                let op = QueuedMutation::DestroyThread {
+                    op_id,
+                    thread_id: thread_id.clone(),
+                };
+                let result = execute_remote_mutation(
+                    client,
+                    &op,
+                    &mut cached_mailboxes,
+                    &rules,
+                    &custom_headers,
+                    &my_email_regex,
+                    cache.as_ref(),
+                )
                 .map_err(|msg| {
                     log_warn!("Failed to destroy thread {}: {}", thread_id, msg);
                     msg
                 });
+                if result.is_ok() {
+                    apply_local_mutation(cache.as_ref(), &op);
+                }
                 let _ = resp_tx.send(BackendResponse::EmailMutation {
                     op_id,
                     id: thread_id,
@@ -1025,19 +1520,25 @@ fn backend_loop(
                     mailbox_name,
                     mailbox_id
                 );
-                let ids_result = fetch_all_mailbox_email_ids(client, &mailbox_id);
-                let (updated, result) = match ids_result {
-                    Ok(ids) => {
-                        let updated = ids.len();
-                        let result = if ids.is_empty() {
-                            Ok(())
-                        } else {
-                            client.mark_emails_read(&ids).map_err(|e| e.to_string())
-                        };
-                        (updated, result)
-                    }
-                    Err(e) => (0, Err(e)),
+                let op = QueuedMutation::MarkMailboxRead {
+                    mailbox_id: mailbox_id.clone(),
+                    mailbox_name: mailbox_name.clone(),
                 };
+                let updated = fetch_all_mailbox_email_ids(client, &mailbox_id)
+                    .map(|ids| ids.len())
+                    .unwrap_or(0);
+                let result = execute_remote_mutation(
+                    client,
+                    &op,
+                    &mut cached_mailboxes,
+                    &rules,
+                    &custom_headers,
+                    &my_email_regex,
+                    cache.as_ref(),
+                );
+                if result.is_ok() {
+                    apply_local_mutation(cache.as_ref(), &op);
+                }
                 let _ = resp_tx.send(BackendResponse::MailboxMarkedRead {
                     mailbox_id,
                     mailbox_name,

@@ -3,7 +3,7 @@ mod mock_jmap;
 use mock_jmap::MockJmapServer;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 struct CliHarness {
@@ -20,6 +20,10 @@ impl CliHarness {
     }
 
     fn start_with_mail_config(mail_config: &str) -> Self {
+        Self::start_with_opts(mail_config, false, None)
+    }
+
+    fn start_with_opts(mail_config: &str, offline: bool, cache_home: Option<PathBuf>) -> Self {
         let server = MockJmapServer::start();
         let config_dir = tempfile::tempdir().expect("create temp dir");
         let config_path = config_dir.path().join("config.toml");
@@ -39,9 +43,17 @@ password_command = "echo test"
         std::fs::write(&config_path, config_content).expect("write config");
 
         let tmc_bin = env!("CARGO_BIN_EXE_tmc");
-        let mut child = Command::new(tmc_bin)
+        let mut command = Command::new(tmc_bin);
+        command
             .arg("--cli")
-            .arg(format!("--config={}", config_path.display()))
+            .arg(format!("--config={}", config_path.display()));
+        if offline {
+            command.arg("--offline");
+        }
+        if let Some(cache_home) = cache_home {
+            command.env("XDG_CACHE_HOME", cache_home);
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -303,6 +315,83 @@ fn test_mark_read_unread() {
     let resp = h.send(json!({"command": "mark_unread", "id": "email-002"}));
     assert_eq!(resp["ok"], true, "mark_unread failed: {}", resp);
     assert_eq!(resp["action"], "MarkUnread");
+}
+
+#[test]
+fn test_offline_queue_replay_on_reconnect() {
+    let cache_dir = tempfile::tempdir().expect("create cache dir");
+
+    // Prime cache from an online session.
+    {
+        let mut online =
+            CliHarness::start_with_opts("", false, Some(cache_dir.path().to_path_buf()));
+        assert_eq!(
+            online.send(json!({"command": "connect", "account": "test"}))["ok"],
+            true
+        );
+        assert_eq!(
+            online.send(json!({"command": "list_mailboxes"}))["ok"],
+            true
+        );
+        assert_eq!(
+            online.send(json!({
+                "command": "query_emails",
+                "mailbox_id": "mbox-inbox",
+                "limit": 50
+            }))["ok"],
+            true
+        );
+    }
+
+    // Queue writes offline; they should succeed and update local cache projection.
+    {
+        let mut offline =
+            CliHarness::start_with_opts("", true, Some(cache_dir.path().to_path_buf()));
+        assert_eq!(
+            offline.send(json!({"command": "connect", "account": "test"}))["ok"],
+            true
+        );
+
+        let mark = offline.send(json!({"command": "mark_read", "id": "email-002"}));
+        assert_eq!(mark["ok"], true, "offline mark_read failed: {}", mark);
+
+        let archive = offline.send(json!({"command": "archive", "id": "email-001"}));
+        assert_eq!(archive["ok"], true, "offline archive failed: {}", archive);
+
+        let inbox = offline.send(json!({
+            "command": "query_emails",
+            "mailbox_id": "mbox-inbox",
+            "limit": 50
+        }));
+        assert_eq!(inbox["ok"], true, "offline query failed: {}", inbox);
+        let ids: Vec<&str> = inbox["emails"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["id"].as_str())
+            .collect();
+        assert!(!ids.contains(&"email-001"));
+    }
+
+    // Reconnect online with the same cache; queued ops should replay to server.
+    {
+        let mut online =
+            CliHarness::start_with_opts("", false, Some(cache_dir.path().to_path_buf()));
+        assert_eq!(
+            online.send(json!({"command": "connect", "account": "test"}))["ok"],
+            true
+        );
+
+        let e1 =
+            online.send(json!({"command": "get_email", "id": "email-001", "headers_only": true}));
+        assert_eq!(e1["ok"], true, "post-replay get_email e1 failed: {}", e1);
+        assert_eq!(e1["mailbox_ids"][0], "mbox-archive");
+
+        let e2 =
+            online.send(json!({"command": "get_email", "id": "email-002", "headers_only": true}));
+        assert_eq!(e2["ok"], true, "post-replay get_email e2 failed: {}", e2);
+        assert_eq!(e2["is_read"], true);
+    }
 }
 
 #[test]
