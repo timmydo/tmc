@@ -672,7 +672,10 @@ impl View for MailboxListView {
                 if result.is_ok()
                     && matches!(
                         action,
-                        EmailMutationAction::MarkRead | EmailMutationAction::MarkUnread
+                        EmailMutationAction::MarkRead
+                            | EmailMutationAction::MarkUnread
+                            | EmailMutationAction::Move
+                            | EmailMutationAction::Destroy
                     )
                 {
                     self.request_refresh("mailbox_list.email_mutation_followup");
