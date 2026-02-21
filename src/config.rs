@@ -64,6 +64,7 @@ pub struct UiConfig {
     pub editor: Option<String>,
     pub browser: Option<String>,
     pub page_size: u32,
+    pub scrolloff: usize,
     pub mouse: bool,
     pub sync_interval_secs: Option<u64>,
 }
@@ -149,6 +150,8 @@ struct RawUiConfig {
     browser: Option<String>,
     #[serde(default = "default_page_size")]
     page_size: u32,
+    #[serde(default = "default_scrolloff")]
+    scrolloff: usize,
     #[serde(default = "default_mouse")]
     mouse: bool,
     #[serde(default = "default_sync_interval_secs")]
@@ -161,6 +164,7 @@ impl Default for RawUiConfig {
             editor: None,
             browser: None,
             page_size: default_page_size(),
+            scrolloff: default_scrolloff(),
             mouse: default_mouse(),
             sync_interval_secs: default_sync_interval_secs(),
         }
@@ -217,6 +221,10 @@ struct RawRetentionPolicy {
 
 fn default_page_size() -> u32 {
     500
+}
+
+fn default_scrolloff() -> usize {
+    1
 }
 
 fn default_mouse() -> bool {
@@ -344,6 +352,7 @@ impl Config {
                 editor: raw.ui.editor,
                 browser: raw.ui.browser,
                 page_size: raw.ui.page_size,
+                scrolloff: raw.ui.scrolloff,
                 mouse: raw.ui.mouse,
                 sync_interval_secs: if raw.ui.sync_interval_secs == 0 {
                     None
@@ -396,6 +405,7 @@ password_command = "pass show email/example.com"
 
 [ui]
 page_size = 25
+scrolloff = 3
 "#,
         )
         .unwrap();
@@ -403,6 +413,7 @@ page_size = 25
         assert_eq!(config.accounts.len(), 1);
         assert_eq!(config.accounts[0].name, "default");
         assert_eq!(config.ui.page_size, 25);
+        assert_eq!(config.ui.scrolloff, 3);
         assert_eq!(config.ui.sync_interval_secs, Some(60));
         assert!(config.ui.mouse);
         assert_eq!(config.mail.rules_mailbox_regex, "^INBOX$");
@@ -415,6 +426,7 @@ page_size = 25
 [ui]
 editor = "nvim"
 page_size = 100
+scrolloff = 2
 
 [account.personal]
 well_known_url = "https://mx.example.com/.well-known/jmap"
@@ -433,12 +445,14 @@ password_command = "pass show email/work.com"
         assert_eq!(config.accounts[0].name, "personal");
         assert_eq!(config.accounts[1].name, "work");
         assert_eq!(config.ui.editor.as_deref(), Some("nvim"));
+        assert_eq!(config.ui.scrolloff, 2);
     }
 
     #[test]
     fn test_defaults_and_sync_interval_zero() {
         let config = Config::parse(&jmap_config("[ui]\nsync_interval_secs = 0")).unwrap();
         assert_eq!(config.ui.page_size, 500);
+        assert_eq!(config.ui.scrolloff, 1);
         assert_eq!(config.ui.sync_interval_secs, None);
     }
 

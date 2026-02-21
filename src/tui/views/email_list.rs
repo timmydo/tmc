@@ -45,6 +45,7 @@ pub struct EmailListView {
     mailbox_id: String,
     mailbox_name: String,
     page_size: u32,
+    scrolloff: usize,
     emails: Vec<Email>,
     cursor: usize,
     total: Option<u32>,
@@ -82,6 +83,7 @@ impl EmailListView {
         mailbox_id: String,
         mailbox_name: String,
         page_size: u32,
+        scrolloff: usize,
         mailboxes: Vec<Mailbox>,
         archive_folder: String,
         deleted_folder: String,
@@ -93,6 +95,7 @@ impl EmailListView {
             mailbox_id,
             mailbox_name,
             page_size,
+            scrolloff,
             emails: Vec::new(),
             cursor: 0,
             total: None,
@@ -367,6 +370,7 @@ impl EmailListView {
                 self.reply_from_address.clone(),
                 thread_id,
                 subject,
+                self.scrolloff,
                 self.mailboxes.clone(),
                 self.archive_folder.clone(),
                 self.deleted_folder.clone(),
@@ -445,11 +449,22 @@ impl EmailListView {
         if max_items == 0 {
             return;
         }
-        if self.cursor < self.scroll_offset {
-            self.scroll_offset = self.cursor;
-        } else if self.cursor >= self.scroll_offset + max_items {
-            self.scroll_offset = self.cursor - max_items + 1;
+        let max_offset = self.emails.len().saturating_sub(max_items);
+        let margin = self.scrolloff.min(max_items.saturating_sub(1));
+        let min_cursor = self.scroll_offset.saturating_add(margin);
+        let max_cursor = self
+            .scroll_offset
+            .saturating_add(max_items.saturating_sub(margin + 1));
+
+        if self.cursor < min_cursor {
+            self.scroll_offset = self.cursor.saturating_sub(margin);
+        } else if self.cursor > max_cursor {
+            self.scroll_offset = self
+                .cursor
+                .saturating_add(margin + 1)
+                .saturating_sub(max_items);
         }
+        self.scroll_offset = self.scroll_offset.min(max_offset);
     }
 
     fn is_in_deleted_folder(&self) -> bool {
@@ -1361,7 +1376,9 @@ mod tests {
         ]
     }
 
-    fn make_view() -> (EmailListView, mpsc::Receiver<BackendCommand>) {
+    fn make_view_with_scrolloff(
+        scrolloff: usize,
+    ) -> (EmailListView, mpsc::Receiver<BackendCommand>) {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let mailboxes = make_mailboxes();
         let mut view = EmailListView::new(
@@ -1370,6 +1387,7 @@ mod tests {
             "mbox-inbox".to_string(),
             "Inbox".to_string(),
             50,
+            scrolloff,
             mailboxes,
             "Archive".to_string(),
             "Trash".to_string(),
@@ -1388,6 +1406,10 @@ mod tests {
         view.thread_counts.insert("thread-B".to_string(), (0, 1));
 
         (view, cmd_rx)
+    }
+
+    fn make_view() -> (EmailListView, mpsc::Receiver<BackendCommand>) {
+        make_view_with_scrolloff(1)
     }
 
     #[test]
@@ -1486,6 +1508,7 @@ mod tests {
             "mbox-trash".to_string(),
             "Trash".to_string(),
             50,
+            1,
             mailboxes,
             "Archive".to_string(),
             "Trash".to_string(),
@@ -1646,5 +1669,38 @@ mod tests {
         // Mark e1 as unread (it's already read), cursor should not move
         view.handle_key(Key::Char('u'), 24);
         assert_eq!(view.cursor, 0, "marking unread should not move cursor");
+    }
+
+    #[test]
+    fn scrolloff_keeps_context_when_scrolling_down() {
+        let (mut view, _cmd_rx) = make_view_with_scrolloff(3);
+        view.emails = (0..20)
+            .map(|i| make_email(&format!("email-{i}"), &format!("thread-{i}")))
+            .collect();
+        view.cursor = 0;
+        view.scroll_offset = 0;
+
+        for _ in 0..8 {
+            view.handle_key(Key::Char('n'), 12);
+        }
+
+        assert_eq!(view.cursor, 8);
+        assert_eq!(view.scroll_offset, 4);
+    }
+
+    #[test]
+    fn scrolloff_keeps_context_when_scrolling_up() {
+        let (mut view, _cmd_rx) = make_view_with_scrolloff(3);
+        view.emails = (0..20)
+            .map(|i| make_email(&format!("email-{i}"), &format!("thread-{i}")))
+            .collect();
+        view.cursor = 8;
+        view.scroll_offset = 4;
+
+        view.handle_key(Key::Char('p'), 12);
+        view.handle_key(Key::Char('p'), 12);
+
+        assert_eq!(view.cursor, 6);
+        assert_eq!(view.scroll_offset, 3);
     }
 }

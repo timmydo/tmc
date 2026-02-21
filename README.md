@@ -64,6 +64,7 @@ Example config:
 [ui]
 editor = "nvim"
 page_size = 100
+scrolloff = 3
 mouse = true
 sync_interval_secs = 60
 

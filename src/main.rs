@@ -121,6 +121,7 @@ Here is the format:
 editor = "nvim"          # optional: editor for composing ($EDITOR fallback)
 browser = "firefox"      # optional: browser for opening URLs ($BROWSER fallback, then xdg-open)
 page_size = 100           # optional: emails per page (default 500)
+scrolloff = 1             # optional: keep this many context lines above/below cursor (default 1)
 mouse = true              # optional: enable mouse support (default true)
 sync_interval_secs = 60   # optional: background sync interval (default 60, 0 = off)
 
@@ -154,6 +155,7 @@ Rules:
 - `well_known_url`, `username`, and `password_command` are required per account.
 - `password_command` is a shell command that prints the password to stdout.
 - Quoted strings support \", \\, \n, \t escapes.
+- `scrolloff` controls how many lines of context are kept above and below the cursor in list views.
 - `archive_folder` and `deleted_folder` are mailbox targets for `a` and `d` in list views.
 - `rules_mailbox_regex` controls which mailbox names auto-run rules on refresh/fetch; default is `^INBOX$`.
 - `my_email_regex` is matched against combined To/Cc and used by rules with `skip_if_to_me = true`.
@@ -272,6 +274,9 @@ fn print_help_config() {
     );
     println!("  browser = \"firefox\"           # Browser for opening URLs (fallback: $BROWSER, xdg-open)");
     println!("  page_size = 500              # Emails per page (default: 500)");
+    println!(
+        "  scrolloff = 1               # Keep this many context lines while scrolling (default: 1)"
+    );
     println!("  mouse = true                 # Enable mouse support (default: true)");
     println!("  sync_interval_secs = 60      # Background sync interval in seconds (default: 60, 0 = off)");
     println!();
@@ -490,6 +495,7 @@ fn main() {
         0,
         first_account_name,
         config.ui.page_size,
+        config.ui.scrolloff,
         config.ui.editor,
         config.ui.browser,
         config.ui.mouse,

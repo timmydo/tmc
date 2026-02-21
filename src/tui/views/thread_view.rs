@@ -31,6 +31,7 @@ pub struct ThreadView {
     reply_from_address: String,
     thread_id: String,
     subject: String,
+    scrolloff: usize,
     emails: Vec<Email>,
     cursor: usize,
     loading: bool,
@@ -57,6 +58,7 @@ impl ThreadView {
         reply_from_address: String,
         thread_id: String,
         subject: String,
+        scrolloff: usize,
         mailboxes: Vec<Mailbox>,
         archive_folder: String,
         deleted_folder: String,
@@ -72,6 +74,7 @@ impl ThreadView {
             reply_from_address,
             thread_id,
             subject,
+            scrolloff,
             emails: Vec::new(),
             cursor: 0,
             loading: true,
@@ -306,11 +309,22 @@ impl ThreadView {
         if max_items == 0 {
             return;
         }
-        if self.cursor < self.scroll_offset {
-            self.scroll_offset = self.cursor;
-        } else if self.cursor >= self.scroll_offset + max_items {
-            self.scroll_offset = self.cursor - max_items + 1;
+        let max_offset = self.emails.len().saturating_sub(max_items);
+        let margin = self.scrolloff.min(max_items.saturating_sub(1));
+        let min_cursor = self.scroll_offset.saturating_add(margin);
+        let max_cursor = self
+            .scroll_offset
+            .saturating_add(max_items.saturating_sub(margin + 1));
+
+        if self.cursor < min_cursor {
+            self.scroll_offset = self.cursor.saturating_sub(margin);
+        } else if self.cursor > max_cursor {
+            self.scroll_offset = self
+                .cursor
+                .saturating_add(margin + 1)
+                .saturating_sub(max_items);
         }
+        self.scroll_offset = self.scroll_offset.min(max_offset);
     }
 
     fn move_selected_to_folder(&mut self, folder: &str, action_label: &str) {

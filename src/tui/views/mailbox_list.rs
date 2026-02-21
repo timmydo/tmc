@@ -19,6 +19,7 @@ pub struct MailboxListView {
     reply_from_address: Option<String>,
     browser: Option<String>,
     page_size: u32,
+    scrolloff: usize,
     mailboxes: Vec<Mailbox>,
     cursor: usize,
     loading: bool,
@@ -47,6 +48,7 @@ impl MailboxListView {
         reply_from_address: Option<String>,
         browser: Option<String>,
         page_size: u32,
+        scrolloff: usize,
         account_names: Vec<String>,
         current_account: String,
         archive_folder: String,
@@ -60,6 +62,7 @@ impl MailboxListView {
             reply_from_address,
             browser,
             page_size,
+            scrolloff,
             mailboxes: Vec::new(),
             cursor: 0,
             loading: true,
@@ -148,6 +151,24 @@ impl MailboxListView {
         }
     }
 
+    fn scroll_offset_for(&self, max_items: usize) -> usize {
+        if max_items == 0 || self.mailboxes.is_empty() {
+            return 0;
+        }
+        let max_offset = self.mailboxes.len().saturating_sub(max_items);
+        let margin = self.scrolloff.min(max_items.saturating_sub(1));
+        let lower_bound = margin;
+        let upper_bound = max_items.saturating_sub(margin + 1);
+
+        if self.cursor < lower_bound {
+            0
+        } else if self.cursor <= upper_bound {
+            0
+        } else {
+            (self.cursor - upper_bound).min(max_offset)
+        }
+    }
+
     fn build_email_list_view(&self, mailbox: &Mailbox) -> EmailListView {
         let reply_from = self
             .reply_from_address
@@ -159,6 +180,7 @@ impl MailboxListView {
             mailbox.id.clone(),
             mailbox.name.clone(),
             self.page_size,
+            self.scrolloff,
             self.mailboxes.clone(),
             self.archive_folder.clone(),
             self.deleted_folder.clone(),
@@ -248,11 +270,7 @@ impl View for MailboxListView {
             term.write_truncated("No mailboxes found.", term.cols)?;
         } else {
             let max_items = (term.rows as usize).saturating_sub(4);
-            let scroll_offset = if self.cursor >= max_items {
-                self.cursor - max_items + 1
-            } else {
-                0
-            };
+            let scroll_offset = self.scroll_offset_for(max_items);
 
             for (i, mailbox) in self
                 .mailboxes
@@ -506,11 +524,7 @@ impl View for MailboxListView {
             Key::MouseClick { row, col: _ } => {
                 if row >= 3 && !self.mailboxes.is_empty() {
                     let max_items = (term_rows as usize).saturating_sub(4);
-                    let scroll_offset = if self.cursor >= max_items {
-                        self.cursor - max_items + 1
-                    } else {
-                        0
-                    };
+                    let scroll_offset = self.scroll_offset_for(max_items);
                     let clicked = scroll_offset + (row - 3) as usize;
                     if clicked < self.mailboxes.len() {
                         self.cursor = clicked;
