@@ -11,7 +11,6 @@ use input::read_key;
 use regex::Regex;
 use screen::Terminal;
 use std::io;
-use std::time::{Duration, Instant};
 use views::mailbox_list::MailboxListView;
 use views::{ViewAction, ViewStack};
 
@@ -93,8 +92,6 @@ pub fn run(
     });
 
     let mut stack = ViewStack::new(Box::new(mailbox_view));
-    let sync_interval = sync_interval_secs.map(Duration::from_secs);
-    let mut last_periodic_sync = Instant::now();
 
     let editor_cmd = editor
         .or_else(|| std::env::var("EDITOR").ok())
@@ -104,18 +101,6 @@ pub fn run(
     stack.render_current(&mut term)?;
 
     loop {
-        if let Some(sync_interval) = sync_interval {
-            if last_periodic_sync.elapsed() >= sync_interval {
-                last_periodic_sync = Instant::now();
-                if let Some(view) = stack.current_mut() {
-                    if view.trigger_periodic_sync() {
-                        sync_mouse_for_view(&mut term, &stack)?;
-                        stack.render_current(&mut term)?;
-                    }
-                }
-            }
-        }
-
         if term.check_resize() {
             sync_mouse_for_view(&mut term, &stack)?;
             stack.render_current(&mut term)?;
@@ -237,7 +222,6 @@ pub fn run(
                                     origin: "switch_account".to_string(),
                                 });
                                 stack = ViewStack::new(Box::new(mailbox_view));
-                                last_periodic_sync = Instant::now();
                             }
                             Err(e) => {
                                 crate::log_error!("Failed to connect to account {}: {}", name, e);

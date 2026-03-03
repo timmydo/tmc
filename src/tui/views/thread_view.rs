@@ -710,12 +710,10 @@ impl View for ThreadView {
             } => {
                 if let Some(pending) = self.pending_write_ops.remove(op_id) {
                     match result {
-                        Ok(()) => match &pending {
-                            PendingWriteOp::Seen { .. } | PendingWriteOp::Move { .. } => {
-                                self.request_refresh();
-                            }
-                            _ => {}
-                        },
+                        Ok(()) => {
+                            // No refresh: optimistic update + cache already
+                            // reflect the correct state. Press 'g' to refresh.
+                        }
                         Err(e) => {
                             self.rollback_pending_write(pending);
                             let action_label = match action {

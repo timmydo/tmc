@@ -1164,8 +1164,32 @@ impl View for EmailListView {
                     Ok(emails) => {
                         self.last_refreshed = Some(SystemTime::now());
                         if *position == 0 {
-                            self.emails = emails.clone();
-                            self.pending_write_ops.clear();
+                            // Collect IDs of emails with in-flight move/destroy
+                            // ops so we can filter them out of incoming data.
+                            // These emails were optimistically removed and must
+                            // stay hidden until the backend confirms or rejects.
+                            let inflight_move_ids: HashSet<&str> = self
+                                .pending_write_ops
+                                .values()
+                                .filter_map(|op| match op {
+                                    PendingWriteOp::Move { email, .. } => Some(email.id.as_str()),
+                                    _ => None,
+                                })
+                                .collect();
+                            if inflight_move_ids.is_empty() {
+                                self.emails = emails.clone();
+                                self.pending_write_ops.clear();
+                            } else {
+                                self.emails = emails
+                                    .iter()
+                                    .filter(|e| !inflight_move_ids.contains(e.id.as_str()))
+                                    .cloned()
+                                    .collect();
+                                // Only clear flag/seen ops — move ops are still
+                                // in flight and must be kept for rollback.
+                                self.pending_write_ops
+                                    .retain(|_, op| matches!(op, PendingWriteOp::Move { .. }));
+                            }
                             self.thread_counts = thread_counts.clone();
                         } else {
                             self.thread_counts
@@ -1201,17 +1225,13 @@ impl View for EmailListView {
             } => {
                 if let Some(pending) = self.pending_write_ops.remove(op_id) {
                     match result {
-                        Ok(()) => match &pending {
-                            PendingWriteOp::Seen { .. } | PendingWriteOp::Flag { .. } => {
-                                // No refresh needed: optimistic update + cache
-                                // update already show the correct state. Refreshing
-                                // here would race with in-flight mutations and
-                                // overwrite optimistic state with stale server data.
-                            }
-                            PendingWriteOp::Move { .. } => {
-                                self.request_refresh("email_list.move_mutation_followup");
-                            }
-                        },
+                        Ok(()) => {
+                            // No refresh needed for any mutation type: optimistic
+                            // update + cache update already show the correct state.
+                            // The user can press 'g' to refresh manually. Auto-
+                            // refreshing after moves raced with in-flight mutations
+                            // and overwrote optimistic state with stale server data.
+                        }
                         Err(e) => {
                             self.rollback_pending_write(pending);
                             let action_label = match action {
@@ -1304,11 +1324,6 @@ impl View for EmailListView {
             }
             _ => false,
         }
-    }
-
-    fn trigger_periodic_sync(&mut self) -> bool {
-        // Disabled: only refresh on explicit user action ('g').
-        false
     }
 }
 

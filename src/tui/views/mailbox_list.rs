@@ -1,4 +1,4 @@
-use crate::backend::{BackendCommand, BackendResponse, EmailMutationAction, RetentionCandidate};
+use crate::backend::{BackendCommand, BackendResponse, RetentionCandidate};
 use crate::compose;
 use crate::config::RetentionPolicyConfig;
 use crate::jmap::types::Mailbox;
@@ -683,30 +683,12 @@ impl View for MailboxListView {
                 }
                 true
             }
-            BackendResponse::EmailMutation { action, result, .. } => {
-                if result.is_ok()
-                    && matches!(
-                        action,
-                        EmailMutationAction::MarkRead
-                            | EmailMutationAction::MarkUnread
-                            | EmailMutationAction::Move
-                            | EmailMutationAction::Destroy
-                    )
-                {
-                    self.request_refresh("mailbox_list.email_mutation_followup");
-                    true
-                } else {
-                    false
-                }
+            BackendResponse::EmailMutation { .. } => {
+                // No refresh: optimistic update + cache already reflect the
+                // correct state. The user can press 'g' to refresh manually.
+                false
             }
-            BackendResponse::ThreadMarkedRead { result, .. } => {
-                if result.is_ok() {
-                    self.request_refresh("mailbox_list.thread_marked_read");
-                    true
-                } else {
-                    false
-                }
-            }
+            BackendResponse::ThreadMarkedRead { .. } => false,
             BackendResponse::MailboxMarkedRead {
                 mailbox_id,
                 mailbox_name,
@@ -740,10 +722,5 @@ impl View for MailboxListView {
             }
             _ => false,
         }
-    }
-
-    fn trigger_periodic_sync(&mut self) -> bool {
-        // Disabled: only refresh on explicit user action ('g').
-        false
     }
 }
