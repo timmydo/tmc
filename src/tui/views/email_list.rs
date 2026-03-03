@@ -1307,11 +1307,8 @@ impl View for EmailListView {
     }
 
     fn trigger_periodic_sync(&mut self) -> bool {
-        if self.loading || self.move_mode || self.search_mode {
-            return false;
-        }
-        self.request_refresh("email_list.periodic_sync");
-        true
+        // Disabled: only refresh on explicit user action ('g').
+        false
     }
 }
 

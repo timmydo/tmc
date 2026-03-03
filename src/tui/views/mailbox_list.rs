@@ -743,10 +743,7 @@ impl View for MailboxListView {
     }
 
     fn trigger_periodic_sync(&mut self) -> bool {
-        if self.loading || self.create_mode || self.delete_confirm_mode {
-            return false;
-        }
-        self.request_refresh("mailbox_list.periodic_sync");
-        true
+        // Disabled: only refresh on explicit user action ('g').
+        false
     }
 }
