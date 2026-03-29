@@ -1022,7 +1022,7 @@ impl View for EmailView {
                 ""
             };
             format!(
-                " line {}/{} | q:back n/p:unread j/k:scroll r:reply R:reply-all F:forward{}{}{} a:archive d:delete m:move ?:help",
+                " line {}/{} | q:back n/p:unread j/k:scroll r:reply R:reply-all F:forward h:html{}{}{} a:archive d:delete m:move ?:help",
                 self.scroll + 1,
                 total_lines,
                 att_hint,
