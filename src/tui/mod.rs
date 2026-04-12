@@ -11,6 +11,7 @@ use input::read_key;
 use regex::Regex;
 use screen::Terminal;
 use std::io;
+use std::time::{Duration, Instant};
 use views::mailbox_list::MailboxListView;
 use views::{ViewAction, ViewStack};
 
@@ -92,6 +93,9 @@ pub fn run(
     });
 
     let mut stack = ViewStack::new(Box::new(mailbox_view));
+    let sync_interval = sync_interval_secs.map(Duration::from_secs);
+    let mut last_user_activity = Instant::now();
+    let mut last_idle_sync = Instant::now();
 
     let editor_cmd = editor
         .or_else(|| std::env::var("EDITOR").ok())
@@ -144,6 +148,7 @@ pub fn run(
         }
 
         if let Some(key) = read_key() {
+            last_user_activity = Instant::now();
             let action = match stack.handle_key(key, term.rows) {
                 Some(action) => action,
                 None => break,
@@ -222,6 +227,7 @@ pub fn run(
                                     origin: "switch_account".to_string(),
                                 });
                                 stack = ViewStack::new(Box::new(mailbox_view));
+                                last_idle_sync = Instant::now();
                             }
                             Err(e) => {
                                 crate::log_error!("Failed to connect to account {}: {}", name, e);
@@ -230,6 +236,14 @@ pub fn run(
                         }
                         sync_mouse_for_view(&mut term, &stack)?;
                         stack.render_current(&mut term)?;
+                    }
+                }
+            }
+        } else if let Some(interval) = sync_interval {
+            if last_user_activity.elapsed() >= interval && last_idle_sync.elapsed() >= interval {
+                if let Some(view) = stack.current_mut() {
+                    if view.trigger_idle_sync() {
+                        last_idle_sync = Instant::now();
                     }
                 }
             }

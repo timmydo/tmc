@@ -48,6 +48,11 @@ pub trait View {
     fn take_pending_action(&mut self) -> Option<ViewAction> {
         None
     }
+    /// Trigger a background sync after the UI has been idle.
+    /// Returns true if this changed view state and should re-render.
+    fn trigger_idle_sync(&mut self) -> bool {
+        false
+    }
 }
 
 pub struct ViewStack {

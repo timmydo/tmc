@@ -723,4 +723,12 @@ impl View for MailboxListView {
             _ => false,
         }
     }
+
+    fn trigger_idle_sync(&mut self) -> bool {
+        if self.loading || self.create_mode || self.delete_confirm_mode {
+            return false;
+        }
+        self.request_refresh("mailbox_list.idle_sync");
+        true
+    }
 }
