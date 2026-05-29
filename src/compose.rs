@@ -250,11 +250,12 @@ pub(crate) fn extract_body_text(email: &crate::jmap::types::Email) -> String {
 /// Heuristic check: does this text look like HTML rather than plain text?
 /// Checks for common HTML structural tags anywhere in the content.
 fn looks_like_html(text: &str) -> bool {
-    let sample = if text.len() > 2000 {
-        &text[..2000]
-    } else {
-        text
-    };
+    // Walk back to the nearest char boundary so multi-byte UTF-8 doesn't panic.
+    let mut end = 2000.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let sample = &text[..end];
     let lower = sample.to_ascii_lowercase();
     lower.contains("<!doctype")
         || lower.contains("<html")
@@ -547,5 +548,17 @@ mod tests {
                 .join("tmc")
                 .join("drafts")
         );
+    }
+
+    #[test]
+    fn test_looks_like_html_handles_multibyte_at_sample_boundary() {
+        // Regression: text with multi-byte UTF-8 (U+034F CGJ, as found in
+        // newsletter preview "tracking pixel" runs) used to panic when the
+        // 2000-byte sample boundary fell inside a code point.
+        let mut s = String::from("AAA");
+        for _ in 0..1000 {
+            s.push_str("X\u{34f}");
+        }
+        assert!(!looks_like_html(&s));
     }
 }

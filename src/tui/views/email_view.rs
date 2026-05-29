@@ -75,12 +75,13 @@ fn wrap_line(s: &str, max_width: usize) -> Vec<&str> {
 /// Heuristic check: does this text look like HTML rather than plain text?
 /// Checks for common HTML structural tags anywhere in the content.
 fn looks_like_html(text: &str) -> bool {
-    // Check a reasonable prefix to avoid scanning huge bodies
-    let sample = if text.len() > 2000 {
-        &text[..2000]
-    } else {
-        text
-    };
+    // Check a reasonable prefix to avoid scanning huge bodies.
+    // Walk back to the nearest char boundary so multi-byte UTF-8 doesn't panic.
+    let mut end = 2000.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let sample = &text[..end];
     let lower = sample.to_ascii_lowercase();
     lower.contains("<!doctype")
         || lower.contains("<html")
