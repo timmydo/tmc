@@ -207,6 +207,12 @@ pub fn all_keybindings() -> Vec<KeyBinding> {
         },
         KeyBinding {
             view: "email_list",
+            key: "S",
+            action: "show_spam_score",
+            description: "Score selected message and tag it (S=spam, ?=unsure)",
+        },
+        KeyBinding {
+            view: "email_list",
             key: "f",
             action: "toggle_flagged",
             description: "Toggle flagged",

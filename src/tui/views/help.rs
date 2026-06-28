@@ -55,6 +55,7 @@ impl HelpView {
             "  D           Expire selected email/thread now (deleted folder only)".to_string(),
             "  J           Mark spam: train classifier and move to Junk".to_string(),
             "  H           Mark not-spam (ham): train classifier and move to Inbox".to_string(),
+            "  S           Score selected message and tag it (S=spam, ?=unsure)".to_string(),
             "  f           Toggle flagged".to_string(),
             "  u           Toggle read/unread".to_string(),
             "  m           Move to folder".to_string(),

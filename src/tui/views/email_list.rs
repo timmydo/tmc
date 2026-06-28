@@ -68,6 +68,9 @@ pub struct EmailListView {
     next_write_op_id: u64,
     pending_write_ops: HashMap<u64, PendingWriteOp>,
     thread_counts: HashMap<String, (usize, usize)>,
+    /// On-demand spam verdicts keyed by email id (from the `S` key), used to tag
+    /// rows in the list. Not persisted; populated as the user scores messages.
+    spam_verdicts: HashMap<String, String>,
     scroll_offset: usize,
     archive_folder: String,
     deleted_folder: String,
@@ -118,6 +121,7 @@ impl EmailListView {
             next_write_op_id: 1,
             pending_write_ops: HashMap::new(),
             thread_counts: HashMap::new(),
+            spam_verdicts: HashMap::new(),
             scroll_offset: 0,
             archive_folder,
             deleted_folder,
@@ -206,7 +210,21 @@ impl EmailListView {
         email.keywords.contains_key("$flagged")
     }
 
-    fn format_email(email: &Email, width: u16, thread_counts: Option<(usize, usize)>) -> String {
+    /// Single-char spam tag for the row: S=spam, ?=unsure, blank=ham/unscored.
+    fn spam_marker(&self, email: &Email) -> &'static str {
+        match self.spam_verdicts.get(&email.id).map(|s| s.as_str()) {
+            Some("spam") => "S",
+            Some("unsure") => "?",
+            _ => " ",
+        }
+    }
+
+    fn format_email(
+        email: &Email,
+        width: u16,
+        thread_counts: Option<(usize, usize)>,
+        spam: &str,
+    ) -> String {
         let unread = if Self::is_unread(email) { "N" } else { " " };
         let flagged = if Self::is_flagged(email) { "F" } else { " " };
 
@@ -240,8 +258,8 @@ impl EmailListView {
             .unwrap_or("");
 
         let w = width as usize;
-        // " NF" (4) + thread_display (8) + date (10) + " " (1) + from + " " (1) + subject
-        let prefix_len = 4 + 8 + 10 + 1;
+        // " NFS" (5) + thread_display (8) + date (10) + " " (1) + from + " " (1) + subject
+        let prefix_len = 5 + 8 + 10 + 1;
         let from_width = 20.min(w.saturating_sub(prefix_len + 1));
         let subj_width = w.saturating_sub(prefix_len + from_width + 1);
 
@@ -249,9 +267,10 @@ impl EmailListView {
         let subj_display = truncate(subject, subj_width);
 
         format!(
-            " {}{}{}{} {:from_w$} {}",
+            " {}{}{}{}{} {:from_w$} {}",
             unread,
             flagged,
+            spam,
             thread_display,
             date,
             from_display,
@@ -694,7 +713,8 @@ impl View for EmailListView {
 
                 let display_idx = self.scroll_offset + i;
                 let thread_counts = self.get_thread_counts(email);
-                let line = Self::format_email(email, term.cols, thread_counts);
+                let line =
+                    Self::format_email(email, term.cols, thread_counts, self.spam_marker(email));
 
                 if display_idx == self.cursor {
                     term.set_selection()?;
@@ -742,7 +762,7 @@ impl View for EmailListView {
                 ""
             };
             format!(
-                " {}/{} | q:back n/p:nav RET:read g:refresh r:reply R:reply-all e:dry-run E:run-rules a:archive d:delete{} J:spam H:ham f:flag u:unread m:move s:search{}{}",
+                " {}/{} | q:back n/p:nav RET:read g:refresh r:reply R:reply-all e:dry-run E:run-rules a:archive d:delete{} J:spam H:ham S:score f:flag u:unread m:move s:search{}{}",
                 self.cursor + 1,
                 self.total.unwrap_or(self.emails.len() as u32),
                 expire_hint,
@@ -1096,6 +1116,16 @@ impl View for EmailListView {
                 self.mark_selected_spam(false);
                 ViewAction::Continue
             }
+            Key::Char('S') => {
+                if let Some(email) = self.emails.get(self.cursor) {
+                    let _ = self.cmd_tx.send(BackendCommand::ClassifyMessage {
+                        origin: "email_list".to_string(),
+                        id: email.id.clone(),
+                    });
+                    self.status_message = Some("Scoring message...".to_string());
+                }
+                ViewAction::Continue
+            }
             Key::Char('D') => {
                 if self.is_in_deleted_folder() {
                     self.expire_selected_now();
@@ -1357,6 +1387,19 @@ impl View for EmailListView {
                     Ok(()) => format!("Trained classifier: marked as {}", label),
                     Err(e) => format!("Training as {} failed: {}", label, e),
                 });
+                true
+            }
+            BackendResponse::MessageClassified { id, result } => {
+                match result {
+                    Ok((score, verdict)) => {
+                        self.spam_verdicts.insert(id.clone(), verdict.clone());
+                        self.status_message =
+                            Some(format!("Spam score: {:.3} -> {}", score, verdict));
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Classify failed: {}", e));
+                    }
+                }
                 true
             }
             _ => false,
