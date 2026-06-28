@@ -130,6 +130,9 @@ Context control for email viewing: `max_body_chars` (truncate body), `headers_on
 
 - Agent-created commits must include a `Co-Authored-By:` trailer.
 - Run `cargo fmt` and wait for it to complete before committing changes.
+- This repo does **not** use pull requests. Commit straight to `master` and
+  `git push origin master` (fast-forward). Do not open PRs or leave work on
+  long-lived feature branches.
 
 ## Current Gaps (as of code in this repo)
 

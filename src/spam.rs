@@ -18,6 +18,11 @@ use std::path::{Path, PathBuf};
 /// and keeps a few extreme tokens from being diluted by a long body.
 const MAX_TOKENS: usize = 150;
 
+/// Hard cap on distinct tokens kept per message. A safety bound so a pathological
+/// message (e.g. one that slips a lot of encoded data past the blob filter)
+/// cannot bloat the trained model.
+const MAX_MESSAGE_TOKENS: usize = 2000;
+
 /// Robinson smoothing: strength `s` and assumed prior probability `x`. A token
 /// seen few times is pulled toward `ASSUMED_PROB`, so rare/unknown tokens carry
 /// little weight until there is real evidence.
@@ -249,7 +254,9 @@ fn header_prefix(name: &str) -> Option<&'static str> {
         "to" | "cc" => Some("to"),
         "subject" => Some("subj"),
         "received" => Some("recv"),
-        "authentication-results" | "received-spf" | "dkim-signature" => Some("auth"),
+        // Note: dkim-signature is intentionally excluded — its value is a base64
+        // cryptographic blob, not linguistic signal.
+        "authentication-results" | "received-spf" => Some("auth"),
         "list-id" | "list-unsubscribe" => Some("list"),
         "content-type" => Some("ctype"),
         "x-mailer" | "user-agent" => Some("mailer"),
@@ -321,13 +328,31 @@ fn strip_html(input: &str) -> String {
     out
 }
 
+/// True if a line is almost entirely base64/hex characters — an encoded
+/// attachment, inline image, DKIM signature, or hash — rather than prose. Such
+/// lines carry no linguistic signal and would otherwise explode the token store
+/// (a single image attachment is thousands of junk fragments).
+fn is_high_entropy_blob(line: &str) -> bool {
+    let t = line.trim();
+    if t.len() < 40 {
+        return false;
+    }
+    let coded = t
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
+        .count();
+    // Prose is broken up by spaces/punctuation; base64 lines are ~100% coded.
+    coded * 100 >= t.len() * 95
+}
+
 /// Extract word tokens from `text`, optionally namespaced with `prefix`, into
 /// `set`. Tokens are lowercased, 2..=40 chars, and split on anything outside a
 /// small token alphabet (letters, digits, and a few mail-relevant symbols).
+/// Base64/hex blob lines are skipped, and the set is capped per message.
 fn collect_words(text: &str, prefix: Option<&str>, set: &mut HashSet<String>) {
     let mut current = String::new();
     let flush = |current: &mut String, set: &mut HashSet<String>| {
-        if current.len() >= 2 && current.len() <= 40 {
+        if current.len() >= 2 && current.len() <= 40 && set.len() < MAX_MESSAGE_TOKENS {
             match prefix {
                 Some(p) => set.insert(format!("{}:{}", p, current)),
                 None => set.insert(current.clone()),
@@ -336,14 +361,23 @@ fn collect_words(text: &str, prefix: Option<&str>, set: &mut HashSet<String>) {
         current.clear();
     };
 
-    for ch in text.chars() {
-        if is_token_char(ch) {
-            current.extend(ch.to_lowercase());
-        } else {
-            flush(&mut current, set);
+    for line in text.lines() {
+        if set.len() >= MAX_MESSAGE_TOKENS {
+            break;
         }
+        if is_high_entropy_blob(line) {
+            continue;
+        }
+        for ch in line.chars() {
+            if is_token_char(ch) {
+                current.extend(ch.to_lowercase());
+            } else {
+                flush(&mut current, set);
+            }
+        }
+        // End of line is a token boundary too.
+        flush(&mut current, set);
     }
-    flush(&mut current, set);
 }
 
 fn is_token_char(ch: char) -> bool {
@@ -419,6 +453,32 @@ mod tests {
         let tokens = tokenize(&m);
         assert!(tokens.contains(&"subj:free".to_string()));
         assert!(tokens.contains(&"subj:money".to_string()));
+    }
+
+    #[test]
+    fn base64_blob_lines_are_skipped() {
+        // A realistic base64 attachment line should be detected as a blob...
+        let b64 = "VGhpcyBpcyBhIHRlc3QgYmFzZTY0IGF0dGFjaG1lbnQgcGF5bG9hZCBsaW5lIHRoYXQ=";
+        assert!(is_high_entropy_blob(b64));
+        // ...while normal prose (with spaces/punctuation) is not.
+        assert!(!is_high_entropy_blob(
+            "Hi Bob, are we still on for lunch tomorrow at noon?"
+        ));
+
+        // A message whose body is mostly an encoded attachment should only
+        // yield tokens from the readable text, not thousands of b64 fragments.
+        let m = msg(
+            &[("Subject", "invoice attached")],
+            &format!("Please see the attached invoice document\n{b64}\n{b64}\n{b64}"),
+        );
+        let tokens = tokenize(&m);
+        assert!(tokens.contains(&"attached".to_string()));
+        assert!(tokens.contains(&"invoice".to_string()));
+        assert!(
+            tokens.len() < 30,
+            "blob fragments leaked into tokens: {} tokens",
+            tokens.len()
+        );
     }
 
     #[test]
