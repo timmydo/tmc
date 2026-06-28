@@ -494,10 +494,17 @@ impl EmailListView {
             .is_some_and(|id| id == self.mailbox_id)
     }
 
-    /// Train the spam classifier on the selected message and relocate it:
-    /// spam -> train + move to Junk; not-spam (ham) -> train + move to Inbox.
-    /// The model update runs on the backend thread; rules.toml auto-files
-    /// future messages from the resulting verdict.
+    fn current_mailbox_has_role(&self, role: &str) -> bool {
+        self.mailboxes
+            .iter()
+            .any(|m| m.id == self.mailbox_id && m.role.as_deref() == Some(role))
+    }
+
+    /// Train the spam classifier on the selected message, and relocate it only
+    /// when that actually changes folders. Spam files to Junk unless already in
+    /// Junk; ham rescues to Inbox only from Junk, and otherwise just trains in
+    /// place. Relocating into the folder you're already viewing would
+    /// optimistically remove the row, then have it reappear on refresh.
     fn mark_selected_spam(&mut self, is_spam: bool) {
         let Some(email) = self.emails.get(self.cursor) else {
             return;
@@ -507,12 +514,13 @@ impl EmailListView {
             id: email.id.clone(),
             spam: is_spam,
         });
-        let (folder, label) = if is_spam {
-            ("junk", "Mark spam")
-        } else {
-            ("inbox", "Mark not-spam")
-        };
-        self.move_selected_to_folder(folder, label);
+        if is_spam {
+            if !self.current_mailbox_has_role("junk") {
+                self.move_selected_to_folder("junk", "Mark spam");
+            }
+        } else if self.current_mailbox_has_role("junk") {
+            self.move_selected_to_folder("inbox", "Mark not-spam");
+        }
     }
 
     fn move_selected_to_folder(&mut self, folder: &str, action_label: &str) {

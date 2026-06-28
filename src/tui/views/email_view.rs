@@ -755,22 +755,38 @@ impl EmailView {
         }
     }
 
-    /// Train the spam classifier on this message and relocate it: marking spam
-    /// trains and moves to Junk; marking not-spam (ham) trains and moves to
-    /// Inbox. The model update happens on the backend thread; rules.toml is what
-    /// auto-files future messages based on the resulting verdict.
+    /// True if the displayed message currently lives in a mailbox with `role`.
+    fn email_in_role(&self, role: &str) -> bool {
+        let Some(ref email) = self.email else {
+            return false;
+        };
+        self.mailboxes
+            .iter()
+            .any(|m| m.role.as_deref() == Some(role) && email.mailbox_ids.contains_key(&m.id))
+    }
+
+    /// Train the spam classifier on this message, relocating only when that
+    /// actually changes folders: spam files to Junk (unless already there); ham
+    /// rescues to Inbox only from Junk. Otherwise it just trains in place so the
+    /// message doesn't needlessly move (and the view doesn't close).
     fn mark_spam(&mut self, is_spam: bool) -> ViewAction {
         let _ = self.cmd_tx.send(BackendCommand::TrainMessage {
             origin: "email_view".to_string(),
             id: self.email_id.clone(),
             spam: is_spam,
         });
-        let (folder, label) = if is_spam {
-            ("junk", "Mark spam")
-        } else {
-            ("inbox", "Mark not-spam")
-        };
-        self.move_to_folder(folder, label)
+        if is_spam {
+            if !self.email_in_role("junk") {
+                return self.move_to_folder("junk", "Mark spam");
+            }
+        } else if self.email_in_role("junk") {
+            return self.move_to_folder("inbox", "Mark not-spam");
+        }
+        self.status_message = Some(format!(
+            "Trained as {}",
+            if is_spam { "spam" } else { "not-spam (ham)" }
+        ));
+        ViewAction::Continue
     }
 
     fn expire_now(&mut self) -> ViewAction {
