@@ -170,6 +170,11 @@ pub fn run(
                     if !stack.pop() {
                         break;
                     }
+                    // Let the revealed view refresh state that may have changed
+                    // while it was hidden (e.g. mailbox unread counts).
+                    if let Some(view) = stack.current_mut() {
+                        view.on_reveal();
+                    }
                     sync_mouse_for_view(&mut term, &stack)?;
                     stack.render_current(&mut term)?;
                 }

@@ -53,6 +53,13 @@ pub trait View {
     fn trigger_idle_sync(&mut self) -> bool {
         false
     }
+    /// Called when this view becomes the top of the stack again after a child
+    /// view was popped (e.g. returning from a folder). Lets a view refresh
+    /// state that may have changed while it was hidden. Returns true if it
+    /// changed state and should re-render.
+    fn on_reveal(&mut self) -> bool {
+        false
+    }
 }
 
 pub struct ViewStack {

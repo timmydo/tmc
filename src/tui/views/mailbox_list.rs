@@ -731,4 +731,11 @@ impl View for MailboxListView {
         self.request_refresh("mailbox_list.idle_sync");
         true
     }
+
+    fn on_reveal(&mut self) -> bool {
+        // Returning from a folder: reads/moves/deletes there may have changed
+        // unread/total counts, so refetch mailboxes to keep the columns accurate.
+        self.request_refresh("mailbox_list.reveal");
+        true
+    }
 }
