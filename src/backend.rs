@@ -124,6 +124,11 @@ pub enum BackendCommand {
         mailbox_id: String,
         limit: u32,
     },
+    /// Score a single message read-only (no actions), e.g. on-demand from the UI.
+    ClassifyMessage {
+        origin: String,
+        id: String,
+    },
     Shutdown,
 }
 
@@ -211,6 +216,11 @@ pub enum BackendResponse {
     },
     MailboxClassified {
         result: Result<Vec<ClassifyEntry>, String>,
+    },
+    MessageClassified {
+        id: String,
+        /// Ok((score, verdict)) or an error.
+        result: Result<(f64, String), String>,
     },
 }
 
@@ -932,6 +942,12 @@ fn handle_offline_command(
         }
         BackendCommand::ClassifyMailbox { .. } => {
             let _ = resp_tx.send(BackendResponse::MailboxClassified {
+                result: Err("classification requires an online connection".to_string()),
+            });
+        }
+        BackendCommand::ClassifyMessage { id, .. } => {
+            let _ = resp_tx.send(BackendResponse::MessageClassified {
+                id: id.clone(),
                 result: Err("classification requires an online connection".to_string()),
             });
         }
@@ -1994,6 +2010,16 @@ fn backend_loop(
                     classify_mailbox(client, &spam_model, &spam_config, &mailbox_id, limit);
                 let _ = resp_tx.send(BackendResponse::MailboxClassified { result });
             }
+            BackendCommand::ClassifyMessage { origin, id } => {
+                log_info!(
+                    "[Backend] cmd#{} ClassifyMessage origin='{}' id={}",
+                    command_seq,
+                    origin,
+                    id
+                );
+                let result = classify_message(client, &spam_model, &spam_config, &id);
+                let _ = resp_tx.send(BackendResponse::MessageClassified { id, result });
+            }
             BackendCommand::Shutdown => {
                 break;
             }
@@ -2052,6 +2078,27 @@ fn train_mailbox(
     }
     model.save(&spam::model_path())?;
     Ok((trained, failed))
+}
+
+/// Score a single message read-only. Returns (score, verdict).
+fn classify_message(
+    client: &JmapClient,
+    model: &SpamModel,
+    config: &SpamConfig,
+    id: &str,
+) -> Result<(f64, String), String> {
+    let raw = client
+        .get_email_raw(id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no raw message source available".to_string())?;
+    let msg = spam::RawMessage::from_bytes(raw.as_bytes());
+    let (score, verdict) = model.classify(
+        &msg,
+        config.threshold,
+        config.ham_threshold,
+        config.min_training,
+    );
+    Ok((score, verdict.as_str().to_string()))
 }
 
 /// Score a mailbox sample read-only (no mutations), for validating the model.

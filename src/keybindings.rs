@@ -491,6 +491,12 @@ pub fn all_keybindings() -> Vec<KeyBinding> {
         },
         KeyBinding {
             view: "email_view",
+            key: "S",
+            action: "show_spam_score",
+            description: "Show this message's spam score and verdict",
+        },
+        KeyBinding {
+            view: "email_view",
             key: "b",
             action: "browse_urls",
             description: "Browse URLs found in message body",

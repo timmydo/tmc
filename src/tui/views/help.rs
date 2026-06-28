@@ -104,6 +104,7 @@ impl HelpView {
             "  u           Toggle read/unread".to_string(),
             "  J           Mark spam: train classifier and move to Junk".to_string(),
             "  H           Mark not-spam (ham): train classifier and move to Inbox".to_string(),
+            "  S           Show this message's spam score and verdict".to_string(),
             "  D           Expire now (deleted folder only)".to_string(),
             String::new(),
         ];

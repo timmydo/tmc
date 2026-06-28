@@ -1041,7 +1041,7 @@ impl View for EmailView {
                 ""
             };
             format!(
-                " line {}/{} | q:back n/p:unread j/k:scroll r:reply R:reply-all F:forward h:html{}{}{} a:archive d:delete m:move J:spam H:ham ?:help",
+                " line {}/{} | q:back n/p:unread j/k:scroll r:reply R:reply-all F:forward h:html{}{}{} a:archive d:delete m:move J:spam H:ham S:score ?:help",
                 self.scroll + 1,
                 total_lines,
                 att_hint,
@@ -1254,6 +1254,14 @@ impl View for EmailView {
             }
             Key::Char('J') => self.mark_spam(true),
             Key::Char('H') => self.mark_spam(false),
+            Key::Char('S') => {
+                let _ = self.cmd_tx.send(BackendCommand::ClassifyMessage {
+                    origin: "email_view".to_string(),
+                    id: self.email_id.clone(),
+                });
+                self.status_message = Some("Scoring message...".to_string());
+                ViewAction::Continue
+            }
             Key::Char('m') => {
                 if !self.mailboxes.is_empty() {
                     self.move_mode = true;
@@ -1541,6 +1549,15 @@ impl View for EmailView {
                         self.rerender_lines();
                     }
                 }
+                true
+            }
+            BackendResponse::MessageClassified { id, result } if *id == self.email_id => {
+                self.status_message = Some(match result {
+                    Ok((score, verdict)) => {
+                        format!("Spam score: {:.3} -> {}", score, verdict)
+                    }
+                    Err(e) => format!("Classify failed: {}", e),
+                });
                 true
             }
             _ => false,

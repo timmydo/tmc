@@ -1436,11 +1436,34 @@ fn cmd_train_mailbox(state: &mut CliState, input: &Value) -> Value {
     }
 }
 
-/// Read-only classification of a mailbox sample (validation; no mutations).
+/// Read-only classification of a single message (`id`) or a mailbox sample
+/// (`mailbox_id` + optional `limit`). Takes no action.
 fn cmd_classify(state: &mut CliState, input: &Value) -> Value {
+    if let Some(id) = input.get("id").and_then(|v| v.as_str()) {
+        let id = id.to_string();
+        if let Err(e) = state.send_cmd(BackendCommand::ClassifyMessage {
+            origin: "cli".to_string(),
+            id: id.clone(),
+        }) {
+            return err_response(&e);
+        }
+        return match state.recv_resp() {
+            Ok(BackendResponse::MessageClassified { id, result }) => match result {
+                Ok((score, verdict)) => ok_response(json!({
+                    "id": id,
+                    "score": score,
+                    "verdict": verdict,
+                })),
+                Err(e) => err_response(&e),
+            },
+            Ok(_) => err_response("unexpected response from backend"),
+            Err(e) => err_response(&e),
+        };
+    }
+
     let mailbox_id = match input.get("mailbox_id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
-        None => return err_response("missing 'mailbox_id' field"),
+        None => return err_response("missing 'mailbox_id' or 'id' field"),
     };
     let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
 
@@ -1676,7 +1699,9 @@ train_mailbox: Bulk-train every message in a mailbox with one label (limit 0 = a
    > {{"command": "train_mailbox", "mailbox_id": "mbox-id", "spam": "ham", "limit": 50}}
    < {{"ok": true, "trained_as": "ham", "trained": 50, "failed": 0}}
 
-classify: Read-only score of a mailbox sample (validation; takes no action).
+classify: Read-only score of one message ("id") or a mailbox sample (takes no action).
+   > {{"command": "classify", "id": "email-id"}}
+   < {{"ok": true, "id": "email-id", "score": 0.97, "verdict": "spam"}}
    > {{"command": "classify", "mailbox_id": "mbox-id", "limit": 20}}
    < {{"ok": true, "count": 20, "results": [{{"id": "..", "score": 0.97, "verdict": "spam"}}]}}
 
