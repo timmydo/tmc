@@ -734,7 +734,12 @@ impl View for MailboxListView {
 
     fn on_reveal(&mut self) -> bool {
         // Returning from a folder: reads/moves/deletes there may have changed
-        // unread/total counts, so refetch mailboxes to keep the columns accurate.
+        // both the unread/total counts and the cached email snapshots. Refetch
+        // counts, and expire snapshot freshness so reopening a folder re-queries
+        // instead of showing stale rows (it still hydrates from cache instantly).
+        for entry in self.email_cache.values_mut() {
+            entry.last_refreshed = SystemTime::UNIX_EPOCH;
+        }
         self.request_refresh("mailbox_list.reveal");
         true
     }
