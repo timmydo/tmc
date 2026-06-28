@@ -475,6 +475,27 @@ impl EmailListView {
             .is_some_and(|id| id == self.mailbox_id)
     }
 
+    /// Train the spam classifier on the selected message and relocate it:
+    /// spam -> train + move to Junk; not-spam (ham) -> train + move to Inbox.
+    /// The model update runs on the backend thread; rules.toml auto-files
+    /// future messages from the resulting verdict.
+    fn mark_selected_spam(&mut self, is_spam: bool) {
+        let Some(email) = self.emails.get(self.cursor) else {
+            return;
+        };
+        let _ = self.cmd_tx.send(BackendCommand::TrainMessage {
+            origin: "email_list".to_string(),
+            id: email.id.clone(),
+            spam: is_spam,
+        });
+        let (folder, label) = if is_spam {
+            ("junk", "Mark spam")
+        } else {
+            ("inbox", "Mark not-spam")
+        };
+        self.move_selected_to_folder(folder, label);
+    }
+
     fn move_selected_to_folder(&mut self, folder: &str, action_label: &str) {
         let Some(target_id) = rules::resolve_mailbox_id(folder, &self.mailboxes) else {
             self.status_message = Some(format!(
@@ -721,7 +742,7 @@ impl View for EmailListView {
                 ""
             };
             format!(
-                " {}/{} | q:back n/p:nav RET:read g:refresh r:reply R:reply-all e:dry-run E:run-rules a:archive d:delete{} f:flag u:unread m:move s:search{}{}",
+                " {}/{} | q:back n/p:nav RET:read g:refresh r:reply R:reply-all e:dry-run E:run-rules a:archive d:delete{} J:spam H:ham f:flag u:unread m:move s:search{}{}",
                 self.cursor + 1,
                 self.total.unwrap_or(self.emails.len() as u32),
                 expire_hint,
@@ -1067,6 +1088,14 @@ impl View for EmailListView {
                 self.move_selected_to_folder(&target, "Delete");
                 ViewAction::Continue
             }
+            Key::Char('J') => {
+                self.mark_selected_spam(true);
+                ViewAction::Continue
+            }
+            Key::Char('H') => {
+                self.mark_selected_spam(false);
+                ViewAction::Continue
+            }
             Key::Char('D') => {
                 if self.is_in_deleted_folder() {
                     self.expire_selected_now();
@@ -1320,6 +1349,14 @@ impl View for EmailListView {
                         self.status_message = Some(format!("Rules run failed: {}", e));
                     }
                 }
+                true
+            }
+            BackendResponse::MessageTrained { spam, result, .. } => {
+                let label = if *spam { "spam" } else { "not-spam" };
+                self.status_message = Some(match result {
+                    Ok(()) => format!("Trained classifier: marked as {}", label),
+                    Err(e) => format!("Training as {} failed: {}", label, e),
+                });
                 true
             }
             _ => false,

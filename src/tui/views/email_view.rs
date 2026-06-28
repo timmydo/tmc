@@ -755,6 +755,24 @@ impl EmailView {
         }
     }
 
+    /// Train the spam classifier on this message and relocate it: marking spam
+    /// trains and moves to Junk; marking not-spam (ham) trains and moves to
+    /// Inbox. The model update happens on the backend thread; rules.toml is what
+    /// auto-files future messages based on the resulting verdict.
+    fn mark_spam(&mut self, is_spam: bool) -> ViewAction {
+        let _ = self.cmd_tx.send(BackendCommand::TrainMessage {
+            origin: "email_view".to_string(),
+            id: self.email_id.clone(),
+            spam: is_spam,
+        });
+        let (folder, label) = if is_spam {
+            ("junk", "Mark spam")
+        } else {
+            ("inbox", "Mark not-spam")
+        };
+        self.move_to_folder(folder, label)
+    }
+
     fn expire_now(&mut self) -> ViewAction {
         if !self.can_expire_now {
             self.status_message =
@@ -1023,7 +1041,7 @@ impl View for EmailView {
                 ""
             };
             format!(
-                " line {}/{} | q:back n/p:unread j/k:scroll r:reply R:reply-all F:forward h:html{}{}{} a:archive d:delete m:move ?:help",
+                " line {}/{} | q:back n/p:unread j/k:scroll r:reply R:reply-all F:forward h:html{}{}{} a:archive d:delete m:move J:spam H:ham ?:help",
                 self.scroll + 1,
                 total_lines,
                 att_hint,
@@ -1234,6 +1252,8 @@ impl View for EmailView {
                 let target = self.deleted_folder.clone();
                 self.move_to_folder(&target, "Delete")
             }
+            Key::Char('J') => self.mark_spam(true),
+            Key::Char('H') => self.mark_spam(false),
             Key::Char('m') => {
                 if !self.mailboxes.is_empty() {
                     self.move_mode = true;

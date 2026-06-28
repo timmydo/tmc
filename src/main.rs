@@ -9,6 +9,7 @@ mod config;
 mod jmap;
 mod keybindings;
 mod rules;
+mod spam;
 mod tui;
 
 use config::{AccountConfig, Config};
@@ -131,6 +132,12 @@ deleted_folder = "Trash"    # optional: target folder for 'd' delete action (def
 rules_mailbox_regex = "^INBOX$"  # optional: auto-run rules only when mailbox name matches (default "^INBOX$")
 my_email_regex = "(?i)(timmy@example\\.com|me@work\\.com)" # optional: your addresses used by rules skip_if_to_me (default "^$")
 
+[spam]
+enabled = true            # optional: score new INBOX mail with the built-in classifier (default true)
+threshold = 0.9           # optional: score >= this -> verdict "spam" (default 0.9)
+ham_threshold = 0.2       # optional: score <= this -> verdict "ham"; between is "unsure" (default 0.2)
+min_training = 20         # optional: trained messages per class before verdicts go live (default 20)
+
 [retention.archive]
 folder = "Archive"
 days = 365                  # expire mail older than 365 days in Archive when pressing X
@@ -159,6 +166,7 @@ Rules:
 - `archive_folder` and `deleted_folder` are mailbox targets for `a` and `d` in list views.
 - `rules_mailbox_regex` controls which mailbox names auto-run rules on refresh/fetch; default is `^INBOX$`.
 - `my_email_regex` is matched against combined To/Cc and used by rules with `skip_if_to_me = true`.
+- `[spam]` configures the built-in Bayesian classifier: it scores new INBOX mail and sets an `X-Tmc-Spam-Verdict` header that rules.toml can act on (train with `J`/`H` in the message view). See `tmc --prompt=rules`.
 - `[retention.NAME]` sections are optional folder retention policies used by `x` (preview) and `X` (expire) in mailbox view.
 - Retention policy fields:
   - `folder` (required): mailbox name, role, or path (e.g. "INBOX/Alerts")
@@ -230,9 +238,23 @@ name = "mark non-boss read"
 not = {{ header = "From", regex = "boss@" }}
 [rule.actions]
 mark_read = true
+
+# Built-in spam classifier verdict (see the [spam] config section)
+[[rule]]
+name = "file spam"
+[rule.match]
+header = "X-Tmc-Spam-Verdict"
+regex = "spam"
+[rule.actions]
+move_to = "junk"
 ```
 
 Available match headers: From, To, Cc, Reply-To, Subject, Message-ID, plus any custom header (e.g. X-Spam-Score, X-Mailing-List).
+
+The built-in Bayesian classifier scores new INBOX messages and injects two synthetic headers you can match on:
+- X-Tmc-Spam-Verdict: "spam", "ham", or "unsure" (threshold already applied)
+- X-Tmc-Spam-Score: the raw 0.0-1.0 score
+Train it from the message view with `J` (mark spam) and `H` (mark not-spam); until trained past `[spam] min_training` per class, the verdict is always "unsure" so no rule fires.
 
 Available actions:
 - mark_read = true
@@ -288,6 +310,14 @@ fn print_help_config() {
     println!("  reply_from = \"Name <email>\"  # Override From header for replies/compose/forward");
     println!("  rules_mailbox_regex = \"^INBOX$\"  # Run rules only on matching mailbox names (default: \"^INBOX$\")");
     println!("  my_email_regex = \"^$\"        # Your email addresses for skip_if_to_me rule option (default: \"^$\")");
+    println!();
+    println!("[spam]                           # Built-in Bayesian spam classifier (scores new INBOX mail)");
+    println!("  enabled = true               # Score new INBOX messages (default: true)");
+    println!("  threshold = 0.9              # Score >= this is verdict \"spam\" (default: 0.9)");
+    println!("  ham_threshold = 0.2          # Score <= this is verdict \"ham\"; between is \"unsure\" (default: 0.2)");
+    println!("  min_training = 20            # Min trained messages per class before verdicts go live (default: 20)");
+    println!("  # Train with J (spam) / H (not-spam) in the message view; act on the");
+    println!("  # X-Tmc-Spam-Verdict header from rules.toml (see: tmc --prompt=rules).");
     println!();
     println!("[account.NAME]                   # At least one account required");
     println!(
@@ -509,6 +539,7 @@ fn main() {
         compiled_rules,
         custom_headers,
         config.theme,
+        config.spam,
         offline,
     ) {
         eprintln!("TUI error: {}", e);

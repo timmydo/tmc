@@ -195,6 +195,18 @@ pub fn all_keybindings() -> Vec<KeyBinding> {
         },
         KeyBinding {
             view: "email_list",
+            key: "J",
+            action: "mark_spam",
+            description: "Mark as spam: train classifier and move to Junk",
+        },
+        KeyBinding {
+            view: "email_list",
+            key: "H",
+            action: "mark_ham",
+            description: "Mark as not-spam (ham): train classifier and move to Inbox",
+        },
+        KeyBinding {
+            view: "email_list",
             key: "f",
             action: "toggle_flagged",
             description: "Toggle flagged",
@@ -464,6 +476,18 @@ pub fn all_keybindings() -> Vec<KeyBinding> {
             key: "m",
             action: "move",
             description: "Move to mailbox (interactive picker)",
+        },
+        KeyBinding {
+            view: "email_view",
+            key: "J",
+            action: "mark_spam",
+            description: "Mark as spam: train classifier and move to Junk",
+        },
+        KeyBinding {
+            view: "email_view",
+            key: "H",
+            action: "mark_ham",
+            description: "Mark as not-spam (ham): train classifier and move to Inbox",
         },
         KeyBinding {
             view: "email_view",

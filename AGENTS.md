@@ -71,6 +71,7 @@ Credentials are fetched by running `password_command`; there is no interactive p
 - `src/cli.rs`: JSON-over-stdin/stdout CLI mode (NDJSON protocol), alternative UI reusing the same backend thread.
 - `src/keybindings.rs`: centralized keybinding dictionary (`KeyBinding` struct + `all_keybindings()`), used by CLI export and `--help-cli`.
 - `src/compose.rs`: compose/reply/forward draft generation and secure temp draft files.
+- `src/spam.rs`: self-contained Bayesian spam classifier (tokenizer + Robinson-Fisher scoring + on-disk model). No JMAP/TUI deps.
 - `src/log.rs`: file logging and `--log` support.
 
 ### Threading model
@@ -81,11 +82,19 @@ Credentials are fetched by running `password_command`; there is no interactive p
 - TUI applies optimistic updates for some actions (read/unread, flag, move) before backend confirmation.
 - CLI blocks synchronously on `resp_rx.recv()` for each command.
 
+### Spam classification
+
+- `src/spam.rs` holds a Bayesian classifier with a JSON model at `$XDG_DATA_HOME/tmc/spam-model.json` (data dir, not cache — it is user-trained and must survive cache clears). The model is owned by the backend thread.
+- During sync, new **INBOX-only** messages (gated by the `inbox` mailbox role) are scored before `apply_rules`. The score is injected into `email.extra` as synthetic headers `X-Tmc-Spam-Score` / `X-Tmc-Spam-Verdict`, so the existing rules engine acts on them via rules.toml. The classifier never moves/deletes mail itself.
+- Cold-start gate: until `[spam] min_training` messages of *each* class are trained, the verdict is always `unsure` and scoring is skipped entirely (no raw-message fetches).
+- Training is driven by `J` (spam) / `H` (ham) in the email view via `BackendCommand::TrainMessage`, which fetches the raw message, updates the model, and persists it atomically.
+- Tunables live in `[spam]` (see `tmc --prompt=config`); rule integration is documented in `tmc --prompt=rules`.
+
 ### CLI mode (`--cli`)
 
 An alternative UI that speaks NDJSON (one JSON object per line) over stdin/stdout. It reuses the same backend thread and `BackendCommand`/`BackendResponse` protocol as the TUI, making it suitable for programmatic interaction and integration testing.
 
-Supported commands: `list_accounts`, `connect`, `status`, `list_mailboxes`, `create_mailbox`, `delete_mailbox`, `query_emails`, `get_email`, `get_thread`, `mark_read`, `mark_unread`, `flag`, `unflag`, `move_email`, `archive`, `delete_email`, `destroy`, `mark_mailbox_read`, `get_raw_headers`, `download_attachment`, `compose_draft`, `reply_draft`, `forward_draft`, `keybindings`.
+Supported commands: `list_accounts`, `connect`, `status`, `list_mailboxes`, `create_mailbox`, `delete_mailbox`, `query_emails`, `get_email`, `get_thread`, `mark_read`, `mark_unread`, `flag`, `unflag`, `move_email`, `archive`, `delete_email`, `destroy`, `mark_mailbox_read`, `get_raw_headers`, `download_attachment`, `compose_draft`, `reply_draft`, `forward_draft`, `train`, `keybindings`.
 
 Response envelope: `{"ok": true, ...data}` or `{"ok": false, "error": "message"}`.
 
@@ -107,7 +116,7 @@ Context control for email viewing: `max_body_chars` (truncate body), `headers_on
 - Global: `?` help, `c` compose.
 - Mailbox list: `q`, `n/p`, `j/k`, arrows, `RET`, `g`, `a`, mouse click/wheel.
 - Email list: `q`, `n/p`, `j/k`, arrows, `RET`, `g`, `f`, `u`, `m`, `s`, `Esc` (clear search), mouse click/wheel.
-- Email view: `q`, `n/p`, `j/k`, arrows, `PgUp/PgDn/Space/Home/End`, `r`, `R`, `F`, `h` (toggle HTML/plain text body), `v`, `f`, `u`, `c`, `a` (archive), `d` (delete), `m` (move), `A` (attachments), `D` (expire).
+- Email view: `q`, `n/p`, `j/k`, arrows, `PgUp/PgDn/Space/Home/End`, `r`, `R`, `F`, `h` (toggle HTML/plain text body), `v`, `f`, `u`, `c`, `a` (archive), `d` (delete), `m` (move), `J` (mark spam: train + move to Junk), `H` (mark not-spam: train + move to Inbox), `A` (attachments), `D` (expire).
 - Help view: `q`/`?`/`Esc` close + navigation keys.
 
 ## Constraints and Non-Goals

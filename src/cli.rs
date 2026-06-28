@@ -254,6 +254,9 @@ fn dispatch(state: &mut CliState, input: &Value) -> Value {
         "destroy" => cmd_destroy(state, input),
         "triage_suggest" => cmd_triage_suggest(state, input),
         "apply_triage_plan" => cmd_apply_triage_plan(state, input),
+        "train" => cmd_train(state, input),
+        "train_mailbox" => cmd_train_mailbox(state, input),
+        "classify" => cmd_classify(state, input),
         "mark_mailbox_read" => cmd_mark_mailbox_read(state, input),
         "get_raw_headers" => cmd_get_raw_headers(state, input),
         "download_attachment" => cmd_download_attachment(state, input),
@@ -325,6 +328,7 @@ fn cmd_connect(state: &mut CliState, input: &Value) -> Value {
         state.custom_headers.clone(),
         state.rules_mailbox_regex.clone(),
         state.my_email_regex.clone(),
+        state.config.spam.clone(),
     );
 
     state.cmd_tx = Some(cmd_tx);
@@ -1351,6 +1355,131 @@ fn cmd_keybindings() -> Value {
     ok_response(json!({"keybindings": list}))
 }
 
+/// Train the spam classifier on a message. `spam` may be a boolean
+/// (`true`=spam, `false`=ham) or the string `"spam"`/`"ham"`.
+fn cmd_train(state: &mut CliState, input: &Value) -> Value {
+    let id = match input.get("id").and_then(|v| v.as_str()) {
+        Some(id) => id.to_string(),
+        None => return err_response("missing 'id' field"),
+    };
+    let spam = match input.get("spam") {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) if s == "spam" => true,
+        Some(Value::String(s)) if s == "ham" => false,
+        _ => return err_response("missing 'spam' field (true/false, or \"spam\"/\"ham\")"),
+    };
+
+    if let Err(e) = state.send_cmd(BackendCommand::TrainMessage {
+        origin: "cli".to_string(),
+        id: id.clone(),
+        spam,
+    }) {
+        return err_response(&e);
+    }
+
+    match state.recv_resp() {
+        Ok(BackendResponse::MessageTrained { spam, result }) => match result {
+            Ok(()) => ok_response(json!({
+                "id": id,
+                "trained_as": if spam { "spam" } else { "ham" },
+            })),
+            Err(e) => err_response(&e),
+        },
+        Ok(_) => err_response("unexpected response from backend"),
+        Err(e) => err_response(&e),
+    }
+}
+
+/// Parse the `spam` field shared by train commands: bool, or "spam"/"ham".
+fn parse_spam_flag(input: &Value) -> Result<bool, String> {
+    match input.get("spam") {
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(Value::String(s)) if s == "spam" => Ok(true),
+        Some(Value::String(s)) if s == "ham" => Ok(false),
+        _ => Err("missing 'spam' field (true/false, or \"spam\"/\"ham\")".to_string()),
+    }
+}
+
+/// Bulk-train every message in a mailbox with one label.
+fn cmd_train_mailbox(state: &mut CliState, input: &Value) -> Value {
+    let mailbox_id = match input.get("mailbox_id").and_then(|v| v.as_str()) {
+        Some(id) => id.to_string(),
+        None => return err_response("missing 'mailbox_id' field"),
+    };
+    let spam = match parse_spam_flag(input) {
+        Ok(s) => s,
+        Err(e) => return err_response(&e),
+    };
+    let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+
+    if let Err(e) = state.send_cmd(BackendCommand::TrainMailbox {
+        origin: "cli".to_string(),
+        mailbox_id: mailbox_id.clone(),
+        spam,
+        limit,
+    }) {
+        return err_response(&e);
+    }
+
+    match state.recv_resp() {
+        Ok(BackendResponse::MailboxTrained { spam, result }) => match result {
+            Ok((trained, failed)) => ok_response(json!({
+                "mailbox_id": mailbox_id,
+                "trained_as": if spam { "spam" } else { "ham" },
+                "trained": trained,
+                "failed": failed,
+            })),
+            Err(e) => err_response(&e),
+        },
+        Ok(_) => err_response("unexpected response from backend"),
+        Err(e) => err_response(&e),
+    }
+}
+
+/// Read-only classification of a mailbox sample (validation; no mutations).
+fn cmd_classify(state: &mut CliState, input: &Value) -> Value {
+    let mailbox_id = match input.get("mailbox_id").and_then(|v| v.as_str()) {
+        Some(id) => id.to_string(),
+        None => return err_response("missing 'mailbox_id' field"),
+    };
+    let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
+
+    if let Err(e) = state.send_cmd(BackendCommand::ClassifyMailbox {
+        origin: "cli".to_string(),
+        mailbox_id: mailbox_id.clone(),
+        limit,
+    }) {
+        return err_response(&e);
+    }
+
+    match state.recv_resp() {
+        Ok(BackendResponse::MailboxClassified { result }) => match result {
+            Ok(entries) => {
+                let results: Vec<Value> = entries
+                    .iter()
+                    .map(|e| {
+                        json!({
+                            "id": e.id,
+                            "from": e.from,
+                            "subject": e.subject,
+                            "score": e.score,
+                            "verdict": e.verdict,
+                        })
+                    })
+                    .collect();
+                ok_response(json!({
+                    "mailbox_id": mailbox_id,
+                    "count": results.len(),
+                    "results": results,
+                }))
+            }
+            Err(e) => err_response(&e),
+        },
+        Ok(_) => err_response("unexpected response from backend"),
+        Err(e) => err_response(&e),
+    }
+}
+
 fn recv_mutation_response(state: &CliState) -> Value {
     match state.recv_resp() {
         Ok(BackendResponse::EmailMutation {
@@ -1538,6 +1667,18 @@ triage_suggest: Dry-run proposal for archive/trash/keep with reasons.
 apply_triage_plan: Apply a saved plan safely, or explicit approved IDs.
    > {{"command": "apply_triage_plan", "plan_id": "plan-1"}}
    > {{"command": "apply_triage_plan", "archive_ids": ["id1"], "trash_ids": ["id2"]}}
+
+train: Train the built-in spam classifier on a message (spam: true/false or "spam"/"ham").
+   > {{"command": "train", "id": "email-id", "spam": true}}
+   < {{"ok": true, "id": "email-id", "trained_as": "spam"}}
+
+train_mailbox: Bulk-train every message in a mailbox with one label (limit 0 = all).
+   > {{"command": "train_mailbox", "mailbox_id": "mbox-id", "spam": "ham", "limit": 50}}
+   < {{"ok": true, "trained_as": "ham", "trained": 50, "failed": 0}}
+
+classify: Read-only score of a mailbox sample (validation; takes no action).
+   > {{"command": "classify", "mailbox_id": "mbox-id", "limit": 20}}
+   < {{"ok": true, "count": 20, "results": [{{"id": "..", "score": 0.97, "verdict": "spam"}}]}}
 
 All mutations return: {{"ok": true, "op_id": N, "id": "...", "action": "..."}}
 

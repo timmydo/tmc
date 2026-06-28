@@ -4,7 +4,7 @@ pub mod views;
 
 use crate::backend::{self, BackendCommand};
 use crate::compose;
-use crate::config::{AccountConfig, RetentionPolicyConfig, Theme};
+use crate::config::{AccountConfig, RetentionPolicyConfig, SpamConfig, Theme};
 use crate::jmap::client::JmapClient;
 use crate::rules::CompiledRule;
 use input::read_key;
@@ -41,6 +41,7 @@ pub fn run(
     rules: Vec<CompiledRule>,
     custom_headers: Vec<String>,
     theme: Theme,
+    spam_config: SpamConfig,
     offline: bool,
 ) -> io::Result<()> {
     let rules = std::sync::Arc::new(rules);
@@ -68,6 +69,7 @@ pub fn run(
         custom_headers.clone(),
         rules_mailbox_regex.clone(),
         my_email_regex.clone(),
+        spam_config.clone(),
     );
     let mut term = Terminal::new(mouse, theme)?;
 
@@ -205,6 +207,7 @@ pub fn run(
                                     custom_headers.clone(),
                                     rules_mailbox_regex.clone(),
                                     my_email_regex.clone(),
+                                    spam_config.clone(),
                                 );
                                 cmd_tx = new_cmd_tx;
                                 resp_rx = new_resp_rx;

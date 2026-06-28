@@ -1,8 +1,9 @@
 use crate::cache::Cache;
-use crate::config::RetentionPolicyConfig;
+use crate::config::{RetentionPolicyConfig, SpamConfig};
 use crate::jmap::client::JmapClient;
 use crate::jmap::types::{Email, Mailbox};
 use crate::rules::{self, CompiledRule};
+use crate::spam::{self, SpamModel};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -104,6 +105,25 @@ pub enum BackendCommand {
         mailbox_id: String,
         mailbox_name: String,
     },
+    /// Train the spam classifier on a message (spam=true) or as ham (spam=false).
+    TrainMessage {
+        origin: String,
+        id: String,
+        spam: bool,
+    },
+    /// Bulk-train every message in a mailbox (up to `limit`, 0 = all).
+    TrainMailbox {
+        origin: String,
+        mailbox_id: String,
+        spam: bool,
+        limit: u32,
+    },
+    /// Score a mailbox sample read-only (no actions) for validation.
+    ClassifyMailbox {
+        origin: String,
+        mailbox_id: String,
+        limit: u32,
+    },
     Shutdown,
 }
 
@@ -180,6 +200,28 @@ pub enum BackendResponse {
         mailbox_name: String,
         result: Result<RulesRunResult, String>,
     },
+    MessageTrained {
+        spam: bool,
+        result: Result<(), String>,
+    },
+    MailboxTrained {
+        spam: bool,
+        /// Ok((trained, failed)) message counts, or an error.
+        result: Result<(usize, usize), String>,
+    },
+    MailboxClassified {
+        result: Result<Vec<ClassifyEntry>, String>,
+    },
+}
+
+/// One message's read-only classification result, used for validation.
+#[derive(Clone, Debug)]
+pub struct ClassifyEntry {
+    pub id: String,
+    pub from: String,
+    pub subject: String,
+    pub score: f64,
+    pub verdict: String,
 }
 
 #[derive(Clone, Debug)]
@@ -447,6 +489,7 @@ fn process_mutation_via_queue(
 }
 
 /// Spawn the backend thread. Returns the command sender and response receiver.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn(
     client: Option<JmapClient>,
     account_name: String,
@@ -454,6 +497,7 @@ pub fn spawn(
     custom_headers: Arc<Vec<String>>,
     rules_mailbox_regex: Arc<Regex>,
     my_email_regex: Arc<Regex>,
+    spam_config: SpamConfig,
 ) -> (
     mpsc::Sender<BackendCommand>,
     mpsc::Receiver<BackendResponse>,
@@ -476,6 +520,13 @@ pub fn spawn(
                 None
             }
         };
+        let spam_model = SpamModel::load(&spam::model_path());
+        log_info!(
+            "[Spam] loaded model ({} spam / {} ham trained, enabled={})",
+            spam_model.spam_messages(),
+            spam_model.ham_messages(),
+            spam_config.enabled
+        );
         backend_loop(
             client,
             cmd_rx,
@@ -485,6 +536,8 @@ pub fn spawn(
             rules_mailbox_regex,
             my_email_regex,
             cache,
+            spam_config,
+            spam_model,
         );
     });
 
@@ -864,6 +917,24 @@ fn handle_offline_command(
                 }),
             });
         }
+        BackendCommand::TrainMessage { spam, .. } => {
+            // Training fetches the raw message over the network; unavailable offline.
+            let _ = resp_tx.send(BackendResponse::MessageTrained {
+                spam: *spam,
+                result: Err("training requires an online connection".to_string()),
+            });
+        }
+        BackendCommand::TrainMailbox { spam, .. } => {
+            let _ = resp_tx.send(BackendResponse::MailboxTrained {
+                spam: *spam,
+                result: Err("training requires an online connection".to_string()),
+            });
+        }
+        BackendCommand::ClassifyMailbox { .. } => {
+            let _ = resp_tx.send(BackendResponse::MailboxClassified {
+                result: Err("classification requires an online connection".to_string()),
+            });
+        }
     }
     true
 }
@@ -936,6 +1007,8 @@ fn execute_remote_mutation(
             }
         }
         QueuedMutation::RunRulesForMailbox { mailbox_id } => {
+            // Offline-replay path: skip spam scoring (None); the model and config
+            // are only threaded into the live command handlers below.
             run_rules_for_mailbox(
                 client,
                 cached_mailboxes,
@@ -944,6 +1017,7 @@ fn execute_remote_mutation(
                 my_email_regex,
                 mailbox_id,
                 cache,
+                None,
             )?;
             Ok(())
         }
@@ -1053,6 +1127,8 @@ fn backend_loop(
     rules_mailbox_regex: Arc<Regex>,
     my_email_regex: Arc<Regex>,
     cache: Option<Cache>,
+    spam_config: SpamConfig,
+    mut spam_model: SpamModel,
 ) {
     let mut cached_mailboxes: Vec<Mailbox> = Vec::new();
     let mut command_seq: u64 = 0;
@@ -1236,7 +1312,7 @@ fn backend_loop(
                             .map(|m| m.name.clone())
                             .unwrap_or_default();
                         if rules_mailbox_regex.is_match(&mailbox_name) {
-                            let emails_for_rules = if let Some(ref cache) = cache {
+                            let mut emails_for_rules = if let Some(ref cache) = cache {
                                 let all_ids: Vec<String> =
                                     emails.iter().map(|e| e.id.clone()).collect();
                                 let unprocessed_ids = cache.filter_unprocessed(&all_ids);
@@ -1259,6 +1335,17 @@ fn backend_loop(
                             };
 
                             if !emails_for_rules.is_empty() {
+                                let scorer = SpamScorer {
+                                    config: &spam_config,
+                                    model: &spam_model,
+                                };
+                                annotate_inbox_spam(
+                                    client,
+                                    Some(&scorer),
+                                    &cached_mailboxes,
+                                    &mailbox_id,
+                                    &mut emails_for_rules,
+                                );
                                 let applications = rules::apply_rules(
                                     &rules,
                                     &emails_for_rules,
@@ -1772,6 +1859,10 @@ fn backend_loop(
                     origin,
                     mailbox_name
                 );
+                let scorer = SpamScorer {
+                    config: &spam_config,
+                    model: &spam_model,
+                };
                 let result = preview_rules_for_mailbox(
                     client,
                     &cached_mailboxes,
@@ -1779,6 +1870,7 @@ fn backend_loop(
                     &custom_headers,
                     &my_email_regex,
                     &mailbox_id,
+                    Some(&scorer),
                 );
                 let _ = resp_tx.send(BackendResponse::RulesDryRun {
                     mailbox_id,
@@ -1797,6 +1889,10 @@ fn backend_loop(
                     origin,
                     mailbox_name
                 );
+                let scorer = SpamScorer {
+                    config: &spam_config,
+                    model: &spam_model,
+                };
                 let result = run_rules_for_mailbox(
                     client,
                     &cached_mailboxes,
@@ -1805,6 +1901,7 @@ fn backend_loop(
                     &my_email_regex,
                     &mailbox_id,
                     cache.as_ref(),
+                    Some(&scorer),
                 );
                 let _ = resp_tx.send(BackendResponse::RulesRun {
                     mailbox_id,
@@ -1812,11 +1909,196 @@ fn backend_loop(
                     result,
                 });
             }
+            BackendCommand::TrainMessage {
+                origin,
+                id,
+                spam: is_spam,
+            } => {
+                log_info!(
+                    "[Backend] cmd#{} TrainMessage origin='{}' id={} spam={}",
+                    command_seq,
+                    origin,
+                    id,
+                    is_spam
+                );
+                let label = if is_spam {
+                    spam::Label::Spam
+                } else {
+                    spam::Label::Ham
+                };
+                let result = train_message(client, &mut spam_model, &id, label);
+                match &result {
+                    Ok(()) => log_info!(
+                        "[Spam] trained {} as {} (model now {} spam / {} ham)",
+                        id,
+                        if is_spam { "spam" } else { "ham" },
+                        spam_model.spam_messages(),
+                        spam_model.ham_messages()
+                    ),
+                    Err(e) => log_warn!("[Spam] training failed for {}: {}", id, e),
+                }
+                let _ = resp_tx.send(BackendResponse::MessageTrained {
+                    spam: is_spam,
+                    result,
+                });
+            }
+            BackendCommand::TrainMailbox {
+                origin,
+                mailbox_id,
+                spam: is_spam,
+                limit,
+            } => {
+                log_info!(
+                    "[Backend] cmd#{} TrainMailbox origin='{}' mailbox={} spam={} limit={}",
+                    command_seq,
+                    origin,
+                    mailbox_id,
+                    is_spam,
+                    limit
+                );
+                let label = if is_spam {
+                    spam::Label::Spam
+                } else {
+                    spam::Label::Ham
+                };
+                let result = train_mailbox(client, &mut spam_model, &mailbox_id, label, limit);
+                if let Ok((trained, failed)) = &result {
+                    log_info!(
+                        "[Spam] bulk-trained mailbox {}: {} as {}, {} failed (model now {} spam / {} ham)",
+                        mailbox_id,
+                        trained,
+                        if is_spam { "spam" } else { "ham" },
+                        failed,
+                        spam_model.spam_messages(),
+                        spam_model.ham_messages()
+                    );
+                }
+                let _ = resp_tx.send(BackendResponse::MailboxTrained {
+                    spam: is_spam,
+                    result,
+                });
+            }
+            BackendCommand::ClassifyMailbox {
+                origin,
+                mailbox_id,
+                limit,
+            } => {
+                log_info!(
+                    "[Backend] cmd#{} ClassifyMailbox origin='{}' mailbox={} limit={}",
+                    command_seq,
+                    origin,
+                    mailbox_id,
+                    limit
+                );
+                let result =
+                    classify_mailbox(client, &spam_model, &spam_config, &mailbox_id, limit);
+                let _ = resp_tx.send(BackendResponse::MailboxClassified { result });
+            }
             BackendCommand::Shutdown => {
                 break;
             }
         }
     }
+}
+
+/// Fetch a message's raw source, train the model with the given label, and
+/// persist the updated model to disk.
+fn train_message(
+    client: &JmapClient,
+    model: &mut SpamModel,
+    id: &str,
+    label: spam::Label,
+) -> Result<(), String> {
+    let raw = client
+        .get_email_raw(id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no raw message source available".to_string())?;
+    let msg = spam::RawMessage::from_bytes(raw.as_bytes());
+    model.train(&msg, label);
+    model.save(&spam::model_path())
+}
+
+/// Bulk-train every message in a mailbox (up to `limit`, 0 = all) with one
+/// label, saving the model once at the end. Returns (trained, failed) counts.
+fn train_mailbox(
+    client: &JmapClient,
+    model: &mut SpamModel,
+    mailbox_id: &str,
+    label: spam::Label,
+    limit: u32,
+) -> Result<(usize, usize), String> {
+    let mut ids = fetch_all_mailbox_email_ids(client, mailbox_id)?;
+    if limit > 0 {
+        ids.truncate(limit as usize);
+    }
+    let mut trained = 0usize;
+    let mut failed = 0usize;
+    for id in &ids {
+        match client.get_email_raw(id) {
+            Ok(Some(raw)) => {
+                let msg = spam::RawMessage::from_bytes(raw.as_bytes());
+                model.train(&msg, label);
+                trained += 1;
+            }
+            Ok(None) => {
+                log_debug!("[Spam] no raw source for {}; skipping", id);
+                failed += 1;
+            }
+            Err(e) => {
+                log_warn!("[Spam] failed to fetch raw {} for training: {}", id, e);
+                failed += 1;
+            }
+        }
+    }
+    model.save(&spam::model_path())?;
+    Ok((trained, failed))
+}
+
+/// Score a mailbox sample read-only (no mutations), for validating the model.
+fn classify_mailbox(
+    client: &JmapClient,
+    model: &SpamModel,
+    config: &SpamConfig,
+    mailbox_id: &str,
+    limit: u32,
+) -> Result<Vec<ClassifyEntry>, String> {
+    let mut ids = fetch_all_mailbox_email_ids(client, mailbox_id)?;
+    if limit > 0 {
+        ids.truncate(limit as usize);
+    }
+    let emails = fetch_emails_chunked(client, &ids, &[])?;
+    let mut out = Vec::with_capacity(emails.len());
+    for email in &emails {
+        let raw = match client.get_email_raw(&email.id) {
+            Ok(Some(raw)) => raw,
+            Ok(None) => continue,
+            Err(e) => {
+                log_warn!("[Spam] classify: failed to fetch raw {}: {}", email.id, e);
+                continue;
+            }
+        };
+        let msg = spam::RawMessage::from_bytes(raw.as_bytes());
+        let (score, verdict) = model.classify(
+            &msg,
+            config.threshold,
+            config.ham_threshold,
+            config.min_training,
+        );
+        let from = email
+            .from
+            .as_ref()
+            .and_then(|f| f.first())
+            .and_then(|a| a.email.clone())
+            .unwrap_or_default();
+        out.push(ClassifyEntry {
+            id: email.id.clone(),
+            from,
+            subject: email.subject.clone().unwrap_or_default(),
+            score,
+            verdict: verdict.as_str().to_string(),
+        });
+    }
+    Ok(out)
 }
 
 const EMAIL_GET_CHUNK_SIZE: usize = 50;
@@ -1862,6 +2144,84 @@ fn fetch_rule_emails_chunked(
     Ok(out)
 }
 
+/// Read-only bundle used to score messages during rule evaluation.
+struct SpamScorer<'a> {
+    config: &'a SpamConfig,
+    model: &'a SpamModel,
+}
+
+fn mailbox_is_inbox(mailboxes: &[Mailbox], mailbox_id: &str) -> bool {
+    mailboxes
+        .iter()
+        .any(|m| m.id == mailbox_id && m.role.as_deref() == Some("inbox"))
+}
+
+/// Score new INBOX messages and inject synthetic `X-Tmc-Spam-Score` /
+/// `X-Tmc-Spam-Verdict` headers into `email.extra` so the rules engine can act
+/// on them via rules.toml. The classifier itself never moves or deletes mail.
+///
+/// No-op unless: a scorer is present and enabled, the model is trained past its
+/// cold-start gate, and `mailbox_id` is the INBOX. Skipping while untrained
+/// avoids fetching raw message bodies before the filter can do anything useful.
+fn annotate_inbox_spam(
+    client: &JmapClient,
+    scorer: Option<&SpamScorer>,
+    mailboxes: &[Mailbox],
+    mailbox_id: &str,
+    emails: &mut [Email],
+) {
+    let Some(scorer) = scorer else {
+        return;
+    };
+    if !scorer.config.enabled || !scorer.model.is_trained(scorer.config.min_training) {
+        return;
+    }
+    if !mailbox_is_inbox(mailboxes, mailbox_id) {
+        return;
+    }
+
+    log_info!(
+        "[Spam] scoring {} INBOX message(s) in mailbox {}",
+        emails.len(),
+        mailbox_id
+    );
+    for email in emails.iter_mut() {
+        let raw = match client.get_email_raw(&email.id) {
+            Ok(Some(raw)) => raw,
+            Ok(None) => {
+                log_debug!("[Spam] no raw source for email {}; skipping", email.id);
+                continue;
+            }
+            Err(e) => {
+                log_warn!("[Spam] failed to fetch raw email {}: {}", email.id, e);
+                continue;
+            }
+        };
+        let msg = spam::RawMessage::from_bytes(raw.as_bytes());
+        let (score, verdict) = scorer.model.classify(
+            &msg,
+            scorer.config.threshold,
+            scorer.config.ham_threshold,
+            scorer.config.min_training,
+        );
+        email.extra.insert(
+            "header:X-Tmc-Spam-Score:asText".to_string(),
+            serde_json::Value::String(format!("{:.4}", score)),
+        );
+        email.extra.insert(
+            "header:X-Tmc-Spam-Verdict:asText".to_string(),
+            serde_json::Value::String(verdict.as_str().to_string()),
+        );
+        log_info!(
+            "[Spam] email {} score={:.4} verdict={}",
+            email.id,
+            score,
+            verdict.as_str()
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_rules_for_mailbox(
     client: &JmapClient,
     mailboxes: &[Mailbox],
@@ -1870,6 +2230,7 @@ fn run_rules_for_mailbox(
     my_email_regex: &Regex,
     mailbox_id: &str,
     cache: Option<&Cache>,
+    spam: Option<&SpamScorer>,
 ) -> Result<RulesRunResult, String> {
     if rules.is_empty() {
         return Ok(RulesRunResult {
@@ -1888,8 +2249,9 @@ fn run_rules_for_mailbox(
         });
     }
 
-    let emails = fetch_rule_emails_chunked(client, &ids, custom_headers)?;
+    let mut emails = fetch_rule_emails_chunked(client, &ids, custom_headers)?;
     let scanned = emails.len();
+    annotate_inbox_spam(client, spam, mailboxes, mailbox_id, &mut emails);
     let applications = rules::apply_rules(rules, &emails, mailboxes, my_email_regex);
     let matched_rules = applications.len();
     let actions = applications.iter().map(|a| a.actions.len()).sum::<usize>();
@@ -1930,6 +2292,7 @@ fn preview_rules_for_mailbox(
     custom_headers: &[String],
     my_email_regex: &Regex,
     mailbox_id: &str,
+    spam: Option<&SpamScorer>,
 ) -> Result<RulesDryRunResult, String> {
     if rules.is_empty() {
         return Ok(RulesDryRunResult {
@@ -1950,8 +2313,9 @@ fn preview_rules_for_mailbox(
         });
     }
 
-    let emails = fetch_rule_emails_chunked(client, &ids, custom_headers)?;
+    let mut emails = fetch_rule_emails_chunked(client, &ids, custom_headers)?;
     let scanned = emails.len();
+    annotate_inbox_spam(client, spam, mailboxes, mailbox_id, &mut emails);
     let mut entries = Vec::new();
     let email_by_id: HashMap<String, &Email> = emails.iter().map(|e| (e.id.clone(), e)).collect();
     let applications = rules::apply_rules(rules, &emails, mailboxes, my_email_regex);

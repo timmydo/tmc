@@ -56,7 +56,23 @@ pub struct Config {
     pub accounts: Vec<AccountConfig>,
     pub ui: UiConfig,
     pub mail: MailConfig,
+    pub spam: SpamConfig,
     pub theme: Theme,
+}
+
+/// Tunables for the built-in Bayesian spam classifier. The classifier scores
+/// new INBOX messages and annotates synthetic `X-Tmc-Spam-Score` /
+/// `X-Tmc-Spam-Verdict` headers; rules.toml decides what to do with them.
+#[derive(Debug, Clone)]
+pub struct SpamConfig {
+    pub enabled: bool,
+    /// Score at or above which a message is labelled `spam`.
+    pub threshold: f64,
+    /// Score at or below which a message is labelled `ham`; in between is `unsure`.
+    pub ham_threshold: f64,
+    /// Minimum trained messages *per class* before any verdict is emitted
+    /// (cold-start gate). Below this, scoring is skipped entirely.
+    pub min_training: u32,
 }
 
 #[derive(Debug)]
@@ -138,7 +154,33 @@ struct RawConfig {
     #[serde(default)]
     retention: BTreeMap<String, RawRetentionPolicy>,
     #[serde(default)]
+    spam: RawSpamConfig,
+    #[serde(default)]
     theme: RawThemeConfig,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSpamConfig {
+    #[serde(default = "default_spam_enabled")]
+    enabled: bool,
+    #[serde(default = "default_spam_threshold")]
+    threshold: f64,
+    #[serde(default = "default_spam_ham_threshold")]
+    ham_threshold: f64,
+    #[serde(default = "default_spam_min_training")]
+    min_training: u32,
+}
+
+impl Default for RawSpamConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_spam_enabled(),
+            threshold: default_spam_threshold(),
+            ham_threshold: default_spam_ham_threshold(),
+            min_training: default_spam_min_training(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -251,6 +293,22 @@ fn default_my_email_regex() -> String {
     "^$".to_string()
 }
 
+fn default_spam_enabled() -> bool {
+    true
+}
+
+fn default_spam_threshold() -> f64 {
+    0.9
+}
+
+fn default_spam_ham_threshold() -> f64 {
+    0.2
+}
+
+fn default_spam_min_training() -> u32 {
+    20
+}
+
 impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let contents = fs::read_to_string(path).map_err(ConfigError::Io)?;
@@ -334,6 +392,24 @@ impl Config {
             });
         }
 
+        for (field, value) in [
+            ("spam.threshold", raw.spam.threshold),
+            ("spam.ham_threshold", raw.spam.ham_threshold),
+        ] {
+            if !(0.0..=1.0).contains(&value) {
+                return Err(ConfigError::Parse(format!(
+                    "{} must be between 0.0 and 1.0 (got {})",
+                    field, value
+                )));
+            }
+        }
+        if raw.spam.ham_threshold > raw.spam.threshold {
+            return Err(ConfigError::Parse(format!(
+                "spam.ham_threshold ({}) must not exceed spam.threshold ({})",
+                raw.spam.ham_threshold, raw.spam.threshold
+            )));
+        }
+
         let theme = Theme {
             bg: resolve_color(&raw.theme.bg, "bg")?,
             fg: resolve_color(&raw.theme.fg, "fg")?,
@@ -369,6 +445,12 @@ impl Config {
                 rules_mailbox_regex: raw.mail.rules_mailbox_regex,
                 my_email_regex: raw.mail.my_email_regex,
                 retention_policies,
+            },
+            spam: SpamConfig {
+                enabled: raw.spam.enabled,
+                threshold: raw.spam.threshold,
+                ham_threshold: raw.spam.ham_threshold,
+                min_training: raw.spam.min_training,
             },
         })
     }
@@ -417,6 +499,54 @@ scrolloff = 3
         assert_eq!(config.ui.sync_interval_secs, Some(60));
         assert!(config.ui.mouse);
         assert_eq!(config.mail.rules_mailbox_regex, "^INBOX$");
+        // Spam defaults when no [spam] section is present.
+        assert!(config.spam.enabled);
+        assert_eq!(config.spam.threshold, 0.9);
+        assert_eq!(config.spam.ham_threshold, 0.2);
+        assert_eq!(config.spam.min_training, 20);
+    }
+
+    #[test]
+    fn test_parse_spam_overrides() {
+        let config = Config::parse(&jmap_config(
+            r#"
+[spam]
+enabled = false
+threshold = 0.95
+ham_threshold = 0.1
+min_training = 50
+"#,
+        ))
+        .unwrap();
+        assert!(!config.spam.enabled);
+        assert_eq!(config.spam.threshold, 0.95);
+        assert_eq!(config.spam.ham_threshold, 0.1);
+        assert_eq!(config.spam.min_training, 50);
+    }
+
+    #[test]
+    fn test_parse_spam_rejects_ham_above_threshold() {
+        let err = Config::parse(&jmap_config(
+            r#"
+[spam]
+threshold = 0.5
+ham_threshold = 0.8
+"#,
+        ))
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::Parse(_)));
+    }
+
+    #[test]
+    fn test_parse_spam_rejects_out_of_range_threshold() {
+        let err = Config::parse(&jmap_config(
+            r#"
+[spam]
+threshold = 1.5
+"#,
+        ))
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::Parse(_)));
     }
 
     #[test]

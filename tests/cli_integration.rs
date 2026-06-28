@@ -20,10 +20,19 @@ impl CliHarness {
     }
 
     fn start_with_mail_config(mail_config: &str) -> Self {
-        Self::start_with_opts(mail_config, false, None)
+        Self::start_with_opts(mail_config, false, None, None)
     }
 
-    fn start_with_opts(mail_config: &str, offline: bool, cache_home: Option<PathBuf>) -> Self {
+    fn start_with_data_home(data_home: PathBuf) -> Self {
+        Self::start_with_opts("", false, None, Some(data_home))
+    }
+
+    fn start_with_opts(
+        mail_config: &str,
+        offline: bool,
+        cache_home: Option<PathBuf>,
+        data_home: Option<PathBuf>,
+    ) -> Self {
         let server = MockJmapServer::start();
         let config_dir = tempfile::tempdir().expect("create temp dir");
         let config_path = config_dir.path().join("config.toml");
@@ -52,6 +61,9 @@ password_command = "echo test"
         }
         if let Some(cache_home) = cache_home {
             command.env("XDG_CACHE_HOME", cache_home);
+        }
+        if let Some(data_home) = data_home {
+            command.env("XDG_DATA_HOME", data_home);
         }
         let mut child = command
             .stdin(Stdio::piped())
@@ -324,7 +336,7 @@ fn test_offline_queue_replay_on_reconnect() {
     // Prime cache from an online session.
     {
         let mut online =
-            CliHarness::start_with_opts("", false, Some(cache_dir.path().to_path_buf()));
+            CliHarness::start_with_opts("", false, Some(cache_dir.path().to_path_buf()), None);
         assert_eq!(
             online.send(json!({"command": "connect", "account": "test"}))["ok"],
             true
@@ -346,7 +358,7 @@ fn test_offline_queue_replay_on_reconnect() {
     // Queue writes offline; they should succeed and update local cache projection.
     {
         let mut offline =
-            CliHarness::start_with_opts("", true, Some(cache_dir.path().to_path_buf()));
+            CliHarness::start_with_opts("", true, Some(cache_dir.path().to_path_buf()), None);
         assert_eq!(
             offline.send(json!({"command": "connect", "account": "test"}))["ok"],
             true
@@ -376,7 +388,7 @@ fn test_offline_queue_replay_on_reconnect() {
     // Reconnect online with the same cache; queued ops should replay to server.
     {
         let mut online =
-            CliHarness::start_with_opts("", false, Some(cache_dir.path().to_path_buf()));
+            CliHarness::start_with_opts("", false, Some(cache_dir.path().to_path_buf()), None);
         assert_eq!(
             online.send(json!({"command": "connect", "account": "test"}))["ok"],
             true
@@ -435,4 +447,49 @@ fn test_download_attachment() {
 
     // Clean up
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn test_train_spam_and_ham() {
+    let data_dir = tempfile::tempdir().expect("create data dir");
+    let mut h = CliHarness::start_with_data_home(data_dir.path().to_path_buf());
+
+    let resp = h.send(json!({"command": "connect", "account": "test"}));
+    assert_eq!(resp["ok"], true, "connect failed: {}", resp);
+
+    // Train a spam message (boolean form).
+    let resp = h.send(json!({"command": "train", "id": "email-003", "spam": true}));
+    assert_eq!(resp["ok"], true, "train spam failed: {}", resp);
+    assert_eq!(resp["id"], "email-003");
+    assert_eq!(resp["trained_as"], "spam");
+
+    // Train a ham message (string form).
+    let resp = h.send(json!({"command": "train", "id": "email-002", "spam": "ham"}));
+    assert_eq!(resp["ok"], true, "train ham failed: {}", resp);
+    assert_eq!(resp["trained_as"], "ham");
+
+    // The model is persisted under $XDG_DATA_HOME/tmc/spam-model.json.
+    let model_path = data_dir.path().join("tmc").join("spam-model.json");
+    let bytes = std::fs::read(&model_path).expect("model file should exist after training");
+    let model: Value = serde_json::from_slice(&bytes).expect("parse model JSON");
+    assert_eq!(model["spam_messages"], 1, "model: {}", model);
+    assert_eq!(model["ham_messages"], 1, "model: {}", model);
+    assert!(
+        !model["tokens"]
+            .as_object()
+            .expect("tokens object")
+            .is_empty(),
+        "model should have learned tokens"
+    );
+}
+
+#[test]
+fn test_train_missing_id_errors() {
+    let mut h = CliHarness::start();
+    let resp = h.send(json!({"command": "connect", "account": "test"}));
+    assert_eq!(resp["ok"], true, "connect failed: {}", resp);
+
+    let resp = h.send(json!({"command": "train", "spam": true}));
+    assert_eq!(resp["ok"], false);
+    assert!(resp["error"].as_str().unwrap_or("").contains("id"));
 }

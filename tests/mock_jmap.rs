@@ -29,6 +29,7 @@ impl EmailRecord {
 
         json!({
             "id": self.id,
+            "blobId": format!("blob-raw-{}", self.id),
             "threadId": self.thread_id,
             "from": [{"name": self.from_name, "email": self.from_email}],
             "to": [{"name": "Test User", "email": "test@example.com"}],
@@ -413,12 +414,24 @@ impl MockJmapServer {
         let path_no_query = path.split('?').next().unwrap_or(path);
         let segments: Vec<&str> = path_no_query.split('/').collect();
         // segments: ["", "download", accountId, blobId, name]
-        if segments.len() >= 5 && segments[3] == "blob-att-001" {
+        let blob_id = segments.get(3).copied().unwrap_or("");
+        if blob_id == "blob-att-001" {
             let fake_pdf_content = b"%PDF-1.4 fake test content for blob-att-001";
             (
                 "200 OK".to_string(),
                 String::from_utf8_lossy(fake_pdf_content).to_string(),
             )
+        } else if let Some(email_id) = blob_id.strip_prefix("blob-raw-") {
+            // Synthesize a raw RFC822 message for the spam classifier to tokenize.
+            let raw = format!(
+                "From: sender-{id}@example.com\r\n\
+                 To: test@example.com\r\n\
+                 Subject: raw message for {id}\r\n\
+                 \r\n\
+                 This is the raw body of {id} with words to tokenize.\r\n",
+                id = email_id
+            );
+            ("200 OK".to_string(), raw)
         } else {
             ("404 Not Found".to_string(), "blob not found".to_string())
         }
