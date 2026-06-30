@@ -639,7 +639,7 @@ impl View for ThreadView {
             }
             Key::Char('c') => {
                 let draft = compose::build_compose_draft(&self.reply_from_address);
-                ViewAction::Compose(draft)
+                ViewAction::Compose(draft.into())
             }
             Key::Char('?') => ViewAction::Push(Box::new(HelpView::new())),
             Key::ScrollUp => {

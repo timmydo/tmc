@@ -180,7 +180,7 @@ pub struct EmailView {
     error: Option<String>,
     pending_reply_all: Option<bool>,
     pending_forward: bool,
-    pending_compose: Option<String>,
+    pending_compose: Option<compose::ComposeDraft>,
     status_message: Option<String>,
     next_write_op_id: u64,
     pending_write_ops: HashMap<u64, PendingWriteOp>,
@@ -1204,13 +1204,23 @@ impl View for EmailView {
                 ViewAction::Continue
             }
             Key::Char('F') => {
+                // Forward as attachment: fetch the full raw message and embed it
+                // as a message/rfc822 part so the HTML part is preserved.
+                let _ = self.cmd_tx.send(BackendCommand::GetEmailRaw {
+                    id: self.email_id.clone(),
+                });
+                self.status_message = Some("Preparing forward (attachment)...".to_string());
+                ViewAction::Continue
+            }
+            Key::Char('f') => {
+                // Forward as inline quoted text.
                 self.pending_forward = true;
                 let _ = self.cmd_tx.send(BackendCommand::GetEmailForReply {
                     id: self.email_id.clone(),
                 });
                 ViewAction::Continue
             }
-            Key::Char('f') => {
+            Key::Char('*') => {
                 if let Some(ref email) = self.email {
                     let old_flagged = email.keywords.contains_key("$flagged");
                     let new_flagged = !old_flagged;
@@ -1299,7 +1309,7 @@ impl View for EmailView {
             }
             Key::Char('c') => {
                 let draft = compose::build_compose_draft(&self.reply_from_address);
-                ViewAction::Compose(draft)
+                ViewAction::Compose(draft.into())
             }
             Key::Char('v') => {
                 self.show_all_headers = !self.show_all_headers;
@@ -1470,18 +1480,35 @@ impl View for EmailView {
                         if is_forward {
                             let draft =
                                 compose::build_forward_draft(email, &self.reply_from_address);
-                            self.pending_compose = Some(draft);
+                            self.pending_compose = Some(draft.into());
                         } else if let Some(reply_all) = reply_all {
                             let draft = compose::build_reply_draft(
                                 email,
                                 reply_all,
                                 &self.reply_from_address,
                             );
-                            self.pending_compose = Some(draft);
+                            self.pending_compose = Some(draft.into());
                         }
                     }
                     Err(e) => {
                         self.error = Some(format!("Failed to load reply data: {}", e));
+                    }
+                }
+                true
+            }
+            BackendResponse::EmailRaw { id, result } if *id == self.email_id => {
+                match result {
+                    Ok(raw) => {
+                        let draft = compose::build_forward_attachment_draft(
+                            self.email.as_ref(),
+                            raw.clone().into_bytes(),
+                            &self.reply_from_address,
+                        );
+                        self.pending_compose = Some(draft);
+                        self.status_message = None;
+                    }
+                    Err(e) => {
+                        self.error = Some(format!("Failed to load message for forward: {}", e));
                     }
                 }
                 true

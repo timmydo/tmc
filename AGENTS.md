@@ -116,7 +116,7 @@ Context control for email viewing: `max_body_chars` (truncate body), `headers_on
 - Global: `?` help, `c` compose.
 - Mailbox list: `q`, `n/p`, `j/k`, arrows, `RET`, `g`, `a`, mouse click/wheel.
 - Email list: `q`, `n/p`, `j/k`, arrows, `RET`, `g`, `f`, `u`, `m`, `s`, `Esc` (clear search), mouse click/wheel.
-- Email view: `q`, `n/p`, `j/k`, arrows, `PgUp/PgDn/Space/Home/End`, `r`, `R`, `F`, `h` (toggle HTML/plain text body), `v`, `f`, `u`, `c`, `a` (archive), `d` (delete), `m` (move), `J` (mark spam: train + move to Junk), `H` (mark not-spam: train + move to Inbox), `A` (attachments), `D` (expire).
+- Email view: `q`, `n/p`, `j/k`, arrows, `PgUp/PgDn/Space/Home/End`, `r`, `R`, `F` (forward as `message/rfc822` attachment, preserves HTML), `f` (forward as inline quoted text), `h` (toggle HTML/plain text body), `v`, `*` (flag), `u`, `c`, `a` (archive), `d` (delete), `m` (move), `J` (mark spam: train + move to Junk), `H` (mark not-spam: train + move to Inbox), `A` (attachments), `D` (expire).
 - Help view: `q`/`?`/`Esc` close + navigation keys.
 
 ## Constraints and Non-Goals

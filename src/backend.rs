@@ -84,6 +84,11 @@ pub enum BackendCommand {
     GetEmailRawHeaders {
         id: String,
     },
+    /// Fetch the full raw RFC822 message (headers + body), e.g. to forward it
+    /// as a `message/rfc822` attachment.
+    GetEmailRaw {
+        id: String,
+    },
     DownloadAttachment {
         blob_id: String,
         name: String,
@@ -182,6 +187,10 @@ pub enum BackendResponse {
         result: Result<(), String>,
     },
     EmailRawHeaders {
+        id: String,
+        result: Result<String, String>,
+    },
+    EmailRaw {
         id: String,
         result: Result<String, String>,
     },
@@ -870,6 +879,12 @@ fn handle_offline_command(
         }
         BackendCommand::GetEmailRawHeaders { id } => {
             let _ = resp_tx.send(BackendResponse::EmailRawHeaders {
+                id: id.clone(),
+                result: Err("not available in offline mode".to_string()),
+            });
+        }
+        BackendCommand::GetEmailRaw { id } => {
+            let _ = resp_tx.send(BackendResponse::EmailRaw {
                 id: id.clone(),
                 result: Err("not available in offline mode".to_string()),
             });
@@ -1790,6 +1805,13 @@ fn backend_loop(
                         }
                     });
                 let _ = resp_tx.send(BackendResponse::EmailRawHeaders { id, result });
+            }
+            BackendCommand::GetEmailRaw { id } => {
+                let result = client
+                    .get_email_raw(&id)
+                    .map_err(|e| e.to_string())
+                    .and_then(|opt| opt.ok_or_else(|| "Email not found".to_string()));
+                let _ = resp_tx.send(BackendResponse::EmailRaw { id, result });
             }
             BackendCommand::DownloadAttachment {
                 blob_id,

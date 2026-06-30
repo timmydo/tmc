@@ -1161,7 +1161,7 @@ impl View for EmailListView {
             }
             Key::Char('c') => {
                 let draft = compose::build_compose_draft(&self.reply_from_address);
-                ViewAction::Compose(draft)
+                ViewAction::Compose(draft.into())
             }
             Key::Char('?') => ViewAction::Push(Box::new(HelpView::new())),
             Key::ScrollUp => {
@@ -1197,7 +1197,7 @@ impl View for EmailListView {
 
     fn take_pending_action(&mut self) -> Option<ViewAction> {
         if let Some(draft) = self.pending_compose.take() {
-            return Some(ViewAction::Compose(draft));
+            return Some(ViewAction::Compose(draft.into()));
         }
         if let Some((mailbox_name, preview)) = self.pending_rules_preview.take() {
             return Some(ViewAction::Push(Box::new(RulesPreviewView::new(

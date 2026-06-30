@@ -499,7 +499,7 @@ impl View for MailboxListView {
                     .as_deref()
                     .unwrap_or(&self.from_address);
                 let draft = compose::build_compose_draft(from);
-                ViewAction::Compose(draft)
+                ViewAction::Compose(draft.into())
             }
             Key::Char('a') => {
                 if let Some(next) = self.next_account_name() {

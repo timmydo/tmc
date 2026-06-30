@@ -2,8 +2,41 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// A draft ready to hand to `$EDITOR`: the editor text plus any files that
+/// should be attached via MML (Emacs message-mode) when the message is sent.
+pub struct ComposeDraft {
+    pub body: String,
+    pub attachments: Vec<DraftAttachment>,
+}
+
+impl ComposeDraft {
+    /// A plain text-only draft with no attachments.
+    pub fn text(body: String) -> Self {
+        ComposeDraft {
+            body,
+            attachments: Vec::new(),
+        }
+    }
+}
+
+impl From<String> for ComposeDraft {
+    fn from(body: String) -> Self {
+        ComposeDraft::text(body)
+    }
+}
+
+/// A file to be written next to the draft and referenced by an MML `<#part>`
+/// tag, so message-mode encodes it as a MIME part on send.
+pub struct DraftAttachment {
+    /// Suggested on-disk / display name, e.g. `forwarded.eml`.
+    pub filename: String,
+    pub content_type: String,
+    pub description: Option<String>,
+    pub data: Vec<u8>,
+}
 
 /// Build a blank compose draft template.
 pub fn build_compose_draft(from: &str) -> String {
@@ -193,6 +226,74 @@ pub fn build_forward_draft(email: &crate::jmap::types::Email, from: &str) -> Str
     draft
 }
 
+/// Build a forward draft that carries the original message as a
+/// `message/rfc822` attachment (preserving the HTML part and everything else).
+///
+/// `email` supplies header metadata (subject, attachment name); `raw` is the
+/// full RFC822 bytes of the original message, written to a sidecar file and
+/// referenced via an MML `<#part>` tag by [`write_compose_draft`].
+pub fn build_forward_attachment_draft(
+    email: Option<&crate::jmap::types::Email>,
+    raw: Vec<u8>,
+    from: &str,
+) -> ComposeDraft {
+    let orig_subject = email
+        .and_then(|e| e.subject.as_deref())
+        .unwrap_or("(no subject)");
+
+    let subject = match email.and_then(|e| e.subject.as_deref()) {
+        Some(s) if s.starts_with("Fwd: ") || s.starts_with("fwd: ") => s.to_string(),
+        Some(s) => format!("Fwd: {}", s),
+        _ => "Fwd: ".to_string(),
+    };
+
+    let mut body = format!("From: {}\nTo: \nSubject: {}\n", from, subject);
+    body.push_str("--text follows this line--\n");
+    body.push_str("\n(forwarded message attached)\n");
+
+    let attachment = DraftAttachment {
+        filename: forward_attachment_filename(orig_subject),
+        content_type: "message/rfc822".to_string(),
+        description: Some(format!("Forwarded message: {}", orig_subject)),
+        data: raw,
+    };
+
+    ComposeDraft {
+        body,
+        attachments: vec![attachment],
+    }
+}
+
+/// Derive a safe `.eml` filename from a subject for the forwarded attachment.
+fn forward_attachment_filename(subject: &str) -> String {
+    let mut name: String = subject
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    // Collapse to a reasonable length and trim filler underscores.
+    if name.len() > 60 {
+        // Walk back to a char boundary (alphanumerics here are ASCII, but the
+        // subject may contain multi-byte letters that pass is_alphanumeric).
+        let mut end = 60;
+        while end > 0 && !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        name.truncate(end);
+    }
+    let name = name.trim_matches('_');
+    if name.is_empty() {
+        "forwarded.eml".to_string()
+    } else {
+        format!("{}.eml", name)
+    }
+}
+
 fn format_address_list(addrs: &[crate::jmap::types::EmailAddress]) -> String {
     addrs
         .iter()
@@ -271,28 +372,107 @@ fn html_to_plain(html: &str) -> String {
     html2text::from_read(html.as_bytes(), 80).unwrap_or_else(|_| html.to_string())
 }
 
-/// Write content to a temp file with restrictive permissions (0600).
-pub fn write_temp_file(content: &str) -> io::Result<PathBuf> {
+/// Paths produced by [`write_compose_draft`] that the caller must remove once
+/// the editor exits: the draft file plus an optional attachments directory.
+pub struct PreparedDraft {
+    pub draft_path: PathBuf,
+    pub attachment_dir: Option<PathBuf>,
+}
+
+/// Write a [`ComposeDraft`] to disk: any attachments go into a private
+/// per-draft subdirectory and are referenced from the body via MML `<#part>`
+/// tags, then the (possibly augmented) body is written to the draft file.
+pub fn write_compose_draft(draft: &ComposeDraft) -> io::Result<PreparedDraft> {
     let dir = draft_dir();
     fs::create_dir_all(&dir)?;
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
 
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let filename = format!("tmc-draft-{}-{}.eml", std::process::id(), ts);
-    let path = dir.join(filename);
+    let stamp = format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
 
+    let mut body = draft.body.clone();
+    let attachment_dir = if draft.attachments.is_empty() {
+        None
+    } else {
+        let att_dir = dir.join(format!("tmc-att-{}", stamp));
+        fs::create_dir_all(&att_dir)?;
+        fs::set_permissions(&att_dir, fs::Permissions::from_mode(0o700))?;
+        for att in &draft.attachments {
+            let path = att_dir.join(sanitize_filename(&att.filename));
+            write_secure_file(&path, &att.data)?;
+            body.push_str(&mml_part(
+                &att.content_type,
+                &path,
+                att.description.as_deref(),
+            ));
+        }
+        Some(att_dir)
+    };
+
+    let draft_path = dir.join(format!("tmc-draft-{}.eml", stamp));
+    write_secure_file(&draft_path, body.as_bytes())?;
+
+    Ok(PreparedDraft {
+        draft_path,
+        attachment_dir,
+    })
+}
+
+/// Write `bytes` to `path`, creating it fresh with 0600 permissions.
+fn write_secure_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = fs::OpenOptions::new()
         .write(true)
         .truncate(true)
         .create_new(true)
         .mode(0o600)
-        .open(&path)?;
+        .open(path)?;
+    io::Write::write_all(&mut file, bytes)
+}
 
-    io::Write::write_all(&mut file, content.as_bytes())?;
-    Ok(path)
+/// Render an MML part tag that tells message-mode to attach `path` on send.
+fn mml_part(content_type: &str, path: &Path, description: Option<&str>) -> String {
+    let mut tag = format!(
+        "\n<#part type=\"{}\" filename=\"{}\" disposition=\"attachment\"",
+        content_type,
+        path.display()
+    );
+    if let Some(desc) = description {
+        // Strip characters that would terminate the attribute / tag.
+        let clean: String = desc
+            .chars()
+            .map(|c| match c {
+                '"' => '\'',
+                '\n' | '\r' => ' ',
+                other => other,
+            })
+            .collect();
+        tag.push_str(&format!(" description=\"{}\"", clean));
+    }
+    tag.push_str(">\n<#/part>\n");
+    tag
+}
+
+/// Make a filename safe to use as a single path component.
+fn sanitize_filename(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | '\0' => '_',
+            other => other,
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches(['.', ' ']);
+    if cleaned.is_empty() {
+        "forwarded.eml".to_string()
+    } else {
+        cleaned.to_string()
+    }
 }
 
 fn draft_dir() -> PathBuf {
@@ -510,6 +690,96 @@ mod tests {
         assert!(draft.contains("Subject: Fwd: Already forwarded\n"));
         // Should not double-prefix
         assert!(!draft.contains("Fwd: Fwd:"));
+    }
+
+    #[test]
+    fn test_build_forward_attachment_draft() {
+        use crate::jmap::types::{Email, EmailAddress};
+        use std::collections::HashMap;
+
+        let email = Email {
+            id: "test-id".to_string(),
+            thread_id: None,
+            from: Some(vec![EmailAddress {
+                name: Some("Sender".to_string()),
+                email: Some("sender@example.com".to_string()),
+            }]),
+            to: None,
+            cc: None,
+            reply_to: None,
+            subject: Some("Hello World".to_string()),
+            received_at: None,
+            sent_at: None,
+            preview: None,
+            text_body: None,
+            html_body: None,
+            body_values: HashMap::new(),
+            keywords: HashMap::new(),
+            mailbox_ids: HashMap::new(),
+            message_id: None,
+            references: None,
+            attachments: None,
+            extra: HashMap::new(),
+        };
+
+        let raw = b"Subject: Hello World\r\nContent-Type: text/html\r\n\r\n<b>hi</b>";
+        let draft = build_forward_attachment_draft(Some(&email), raw.to_vec(), "me@example.com");
+
+        assert!(draft.body.contains("Subject: Fwd: Hello World"));
+        assert!(draft.body.contains("--text follows this line--"));
+        assert!(draft.body.contains("(forwarded message attached)"));
+        // The raw bytes must travel as a single message/rfc822 attachment, not
+        // be flattened into the editor body.
+        assert_eq!(draft.attachments.len(), 1);
+        let att = &draft.attachments[0];
+        assert_eq!(att.content_type, "message/rfc822");
+        assert_eq!(att.filename, "Hello_World.eml");
+        assert_eq!(att.data, raw.to_vec());
+        assert!(!draft.body.contains("<b>hi</b>"));
+    }
+
+    #[test]
+    fn test_build_forward_attachment_draft_no_metadata() {
+        // Falls back to a generic subject/filename when the email is unknown.
+        let draft = build_forward_attachment_draft(None, b"raw".to_vec(), "me@example.com");
+        assert!(draft.body.contains("Subject: Fwd: \n"));
+        assert_eq!(draft.attachments[0].filename, "no_subject.eml");
+    }
+
+    #[test]
+    fn test_forward_attachment_filename() {
+        assert_eq!(
+            forward_attachment_filename("Hello, World!"),
+            "Hello__World.eml"
+        );
+        assert_eq!(forward_attachment_filename("   "), "forwarded.eml");
+        assert_eq!(forward_attachment_filename(""), "forwarded.eml");
+        // Path separators must never leak into the derived name.
+        assert!(!forward_attachment_filename("a/b\\c").contains('/'));
+        assert!(!forward_attachment_filename("a/b\\c").contains('\\'));
+    }
+
+    #[test]
+    fn test_mml_part_escapes_description_and_targets_file() {
+        let part = mml_part(
+            "message/rfc822",
+            Path::new("/tmp/fwd/orig.eml"),
+            Some("Forwarded: say \"hi\"\nthere"),
+        );
+        assert!(part.contains("type=\"message/rfc822\""));
+        assert!(part.contains("filename=\"/tmp/fwd/orig.eml\""));
+        assert!(part.contains("disposition=\"attachment\""));
+        assert!(part.trim_end().ends_with("<#/part>"));
+        // A stray quote/newline in the description must not break the tag.
+        assert!(!part.contains("say \"hi\""));
+        assert!(part.contains("say 'hi' there"));
+    }
+
+    #[test]
+    fn test_sanitize_filename() {
+        assert_eq!(sanitize_filename("a/b"), "a_b");
+        assert_eq!(sanitize_filename("..."), "forwarded.eml");
+        assert_eq!(sanitize_filename("  spaced.eml  "), "spaced.eml");
     }
 
     #[test]

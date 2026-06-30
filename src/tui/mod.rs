@@ -263,18 +263,23 @@ pub fn run(
     Ok(())
 }
 
-fn spawn_editor(draft_text: &str, editor_cmd: &str) {
-    // Write draft to temp file
-    let temp_path = match compose::write_temp_file(draft_text) {
-        Ok(path) => path,
+fn spawn_editor(draft: &compose::ComposeDraft, editor_cmd: &str) {
+    // Write draft (and any attachment sidecar files) to temp storage.
+    let prepared = match compose::write_compose_draft(draft) {
+        Ok(prepared) => prepared,
         Err(e) => {
             crate::log_error!("Failed to create temp file: {}", e);
             return;
         }
     };
 
+    let compose::PreparedDraft {
+        draft_path,
+        attachment_dir,
+    } = prepared;
+
     // Spawn editor as a separate process
-    let path_str = temp_path.display().to_string();
+    let path_str = draft_path.display().to_string();
     let child = std::process::Command::new("sh")
         .arg("-c")
         .arg(format!("{} {}", editor_cmd, path_str))
@@ -282,15 +287,21 @@ fn spawn_editor(draft_text: &str, editor_cmd: &str) {
 
     match child {
         Ok(mut child) => {
-            // Background thread waits for editor exit then cleans up temp file
+            // Background thread waits for editor exit then cleans up temp files
             std::thread::spawn(move || {
                 let _ = child.wait();
-                let _ = std::fs::remove_file(&temp_path);
+                let _ = std::fs::remove_file(&draft_path);
+                if let Some(dir) = attachment_dir {
+                    let _ = std::fs::remove_dir_all(&dir);
+                }
             });
         }
         Err(e) => {
             crate::log_error!("Failed to spawn editor: {}", e);
-            let _ = std::fs::remove_file(&temp_path);
+            let _ = std::fs::remove_file(&draft_path);
+            if let Some(dir) = attachment_dir {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
         }
     }
 }

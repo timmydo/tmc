@@ -30,7 +30,7 @@ pub enum ViewAction {
     Push(Box<dyn View>),
     Pop,
     Quit,
-    Compose(String),
+    Compose(crate::compose::ComposeDraft),
     SwitchAccount(String),
 }
 

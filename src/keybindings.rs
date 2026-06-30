@@ -426,8 +426,14 @@ pub fn all_keybindings() -> Vec<KeyBinding> {
         KeyBinding {
             view: "email_view",
             key: "F",
+            action: "forward_attachment",
+            description: "Forward as attachment (preserves HTML)",
+        },
+        KeyBinding {
+            view: "email_view",
+            key: "f",
             action: "forward",
-            description: "Forward",
+            description: "Forward as inline quoted text",
         },
         KeyBinding {
             view: "email_view",
@@ -449,7 +455,7 @@ pub fn all_keybindings() -> Vec<KeyBinding> {
         },
         KeyBinding {
             view: "email_view",
-            key: "f",
+            key: "*",
             action: "toggle_flagged",
             description: "Toggle flagged",
         },
