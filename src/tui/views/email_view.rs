@@ -646,7 +646,8 @@ impl EmailView {
                 .stderr(std::process::Stdio::null())
                 .spawn()
             {
-                Ok(_) => {
+                Ok(child) => {
+                    crate::tui::reap_in_background(child);
                     self.status_message = Some(format!("Opening [{}]...", index + 1));
                 }
                 Err(e) => {
@@ -1555,7 +1556,7 @@ impl View for EmailView {
                             .stderr(std::process::Stdio::null())
                             .spawn()
                         {
-                            Ok(_) => {}
+                            Ok(child) => crate::tui::reap_in_background(child),
                             Err(e) => {
                                 self.status_message =
                                     Some(format!("Saved {} (could not open: {})", name, e));

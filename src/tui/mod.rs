@@ -20,6 +20,15 @@ fn sync_mouse_for_view(term: &mut Terminal, stack: &ViewStack) -> io::Result<()>
     term.set_mouse_enabled(wants_mouse)
 }
 
+/// Wait on a fire-and-forget child in a detached thread so it does not linger
+/// as a zombie. `Child` has no reaping `Drop` impl, so a dropped handle leaks a
+/// PID slot for the lifetime of tmc.
+pub fn reap_in_background(mut child: std::process::Child) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     client: Option<JmapClient>,
