@@ -9,7 +9,35 @@ pub struct AccountConfig {
     pub name: String,
     pub well_known_url: String,
     pub username: String,
-    pub password_command: String,
+    pub password: PasswordSource,
+}
+
+/// Where an account's password comes from. `Command` runs a shell command
+/// and takes its stdout; `File` reads a file directly, which needs no shell
+/// and suits a sandbox that has none. Exactly one is configured per account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PasswordSource {
+    Command(String),
+    File(String),
+}
+
+fn password_source(
+    password_command: Option<String>,
+    password_file: Option<String>,
+    section: &str,
+) -> Result<PasswordSource, ConfigError> {
+    match (password_command, password_file) {
+        (Some(command), None) => Ok(PasswordSource::Command(command)),
+        (None, Some(file)) => Ok(PasswordSource::File(file)),
+        (Some(_), Some(_)) => Err(ConfigError::Parse(format!(
+            "both password_command and password_file set in {}; choose one",
+            section
+        ))),
+        (None, None) => Err(ConfigError::Parse(format!(
+            "missing password_command or password_file in {}",
+            section
+        ))),
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -252,6 +280,7 @@ struct RawAccountFields {
     well_known_url: Option<String>,
     username: Option<String>,
     password_command: Option<String>,
+    password_file: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -362,9 +391,10 @@ impl Config {
                     account.username,
                     &format!("missing username in [account.{}]", account_name),
                 )?,
-                password_command: require_field(
+                password: password_source(
                     account.password_command,
-                    &format!("missing password_command in [account.{}]", account_name),
+                    account.password_file,
+                    &format!("[account.{}]", account_name),
                 )?,
             });
         }
@@ -385,9 +415,10 @@ impl Config {
                     jmap.username,
                     "missing username (in [jmap] or [account.NAME])",
                 )?,
-                password_command: require_field(
+                password: password_source(
                     jmap.password_command,
-                    "missing password_command (in [jmap] or [account.NAME])",
+                    jmap.password_file,
+                    "[jmap]",
                 )?,
             });
         }
@@ -779,5 +810,43 @@ password_command = "pass show email/example.com"
             config.mail.reply_from.as_deref(),
             Some("Example User <user@example.com>")
         );
+    }
+
+    #[test]
+    fn test_password_file_is_one_of_two_sources() {
+        let config = Config::parse(
+            r#"
+[account.td]
+well_known_url = "https://mx.example.com/.well-known/jmap"
+username = "user@example.com"
+password_file = "/home/td/.config/tmc/password"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.accounts[0].password,
+            PasswordSource::File("/home/td/.config/tmc/password".to_string())
+        );
+        let command = Config::parse(&jmap_config("")).unwrap();
+        assert_eq!(
+            command.accounts[0].password,
+            PasswordSource::Command("pass show email/example.com".to_string())
+        );
+        for (body, needle) in [
+            (
+                "well_known_url = \"https://mx.example.com/.well-known/jmap\"\nusername = \"u@example.com\"\n",
+                "missing password_command or password_file",
+            ),
+            (
+                "well_known_url = \"https://mx.example.com/.well-known/jmap\"\nusername = \"u@example.com\"\npassword_command = \"pass\"\npassword_file = \"/p\"\n",
+                "both password_command and password_file",
+            ),
+        ] {
+            let err = Config::parse(&format!("[account.td]\n{}", body)).unwrap_err();
+            match err {
+                ConfigError::Parse(msg) => assert!(msg.contains(needle), "got: {}", msg),
+                _ => panic!("expected parse error"),
+            }
+        }
     }
 }
