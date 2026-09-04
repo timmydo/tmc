@@ -23,7 +23,9 @@
 - Rust toolchain (stable) with Cargo.
 - A JMAP server/account.
 - An editor available via `$EDITOR` (for compose/reply/forward flow).
-- A non-interactive credential command for `password_command` (for example `pass`).
+- A password source per account: a non-interactive credential command for
+  `password_command` (for example `pass`), or a file for `password_file`
+  (read directly, no shell involved; keep it mode 0600).
 
 ## Build
 
@@ -85,7 +87,12 @@ username = "me@work.com"
 password_command = "pass show email/work.com"
 ```
 
-Legacy fallback is supported via `[jmap]` with `well_known_url`, `username`, and `password_command`.
+Each account sets exactly one of `password_command` or `password_file`.
+Legacy fallback is supported via `[jmap]` with `well_known_url`, `username`, and one of those.
+
+If the first account cannot be reached at startup (server down, network not
+up yet, placeholder credentials), tmc starts offline from its cache instead
+of exiting; selecting the account again retries the connection.
 
 Optional rules file path defaults to `rules.toml` next to your config; override with `--rules=PATH`.
 

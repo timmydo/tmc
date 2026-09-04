@@ -12,7 +12,7 @@ mod rules;
 mod spam;
 mod tui;
 
-use config::{AccountConfig, Config};
+use config::{AccountConfig, Config, PasswordSource};
 use jmap::client::JmapClient;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -52,8 +52,25 @@ pub fn run_password_command(cmd: &str) -> Result<String, String> {
     Ok(password.trim_end_matches('\n').to_string())
 }
 
+/// Read a password file as `password_file` names it: the whole file with
+/// trailing newlines removed, so a file written by `echo` or an editor works.
+pub fn read_password_file(path: &str) -> Result<String, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("failed to read password file {}: {}", path, e))?;
+    let password = String::from_utf8(bytes)
+        .map_err(|e| format!("password file {} is not valid UTF-8: {}", path, e))?;
+    Ok(password.trim_end_matches('\n').to_string())
+}
+
+pub fn read_password(source: &PasswordSource) -> Result<String, String> {
+    match source {
+        PasswordSource::Command(command) => run_password_command(command),
+        PasswordSource::File(path) => read_password_file(path),
+    }
+}
+
 pub fn connect_account(account: &AccountConfig) -> Result<JmapClient, String> {
-    let password = run_password_command(&account.password_command)?;
+    let password = read_password(&account.password)?;
     let (_session, client) =
         JmapClient::discover(&account.well_known_url, &account.username, &password)
             .map_err(|e| format!("JMAP discovery error: {}", e))?;
@@ -159,8 +176,9 @@ password_command = "pass show email/work.com"
 
 Rules:
 - At least one [account.NAME] section is required (or legacy [jmap] with the same three fields).
-- `well_known_url`, `username`, and `password_command` are required per account.
+- `well_known_url`, `username`, and exactly one of `password_command` or `password_file` are required per account.
 - `password_command` is a shell command that prints the password to stdout.
+- `password_file` is a path whose contents (minus trailing newlines) are the password; it needs no shell.
 - Quoted strings support \", \\, \n, \t escapes.
 - `scrolloff` controls how many lines of context are kept above and below the cursor in list views.
 - `archive_folder` and `deleted_folder` are mailbox targets for `a` and `d` in list views.
@@ -509,9 +527,15 @@ fn main() {
                 Some(client)
             }
             Err(e) => {
+                // A server that is down, a network that is not up yet, or a
+                // placeholder account: start from the cache instead of
+                // exiting, so the window stays open and switching to the
+                // account again retries the connection.
                 eprintln!(" FAILED");
                 eprintln!("{}", e);
-                std::process::exit(1);
+                eprintln!("Starting offline; select the account again to reconnect.");
+                log_error!("[Startup] connect to {} failed: {}", first_account.name, e);
+                None
             }
         }
     };
