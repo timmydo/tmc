@@ -86,9 +86,17 @@ pub fn available() -> bool {
 }
 
 /// GET `url` with `headers` (names in lower case), taking at most `limit`
-/// body bytes (the service's ceiling when `None`).
-pub fn get(url: &str, headers: &[(&str, &str)], limit: Option<u64>) -> Result<Response, Error> {
-    request("GET", url, headers, &[], limit)
+/// body bytes (the service's ceiling when `None`), the service following at
+/// most `redirects` (its own five when `None`). The service drops
+/// `authorization` on a redirect it follows; a client that carries one asks
+/// for `Some(0)` and follows the `location` it is handed itself.
+pub fn get(
+    url: &str,
+    headers: &[(&str, &str)],
+    limit: Option<u64>,
+    redirects: Option<u32>,
+) -> Result<Response, Error> {
+    request("GET", url, headers, &[], limit, redirects)
 }
 
 /// POST `body` to `url` with `headers` (names in lower case). A reader has
@@ -100,7 +108,7 @@ pub fn post(
     body: &[u8],
     limit: Option<u64>,
 ) -> Result<Response, Error> {
-    request("POST", url, headers, body, limit)
+    request("POST", url, headers, body, limit, None)
 }
 
 fn request(
@@ -109,6 +117,7 @@ fn request(
     headers: &[(&str, &str)],
     body: &[u8],
     limit: Option<u64>,
+    redirects: Option<u32>,
 ) -> Result<Response, Error> {
     let path = socket_path().ok_or_else(|| Error::Io("no td-fetch socket".into()))?;
     let mut stream = UnixStream::connect(&path).map_err(|e| Error::Io(format!("connect: {e}")))?;
@@ -128,11 +137,11 @@ fn request(
         head.push_str(value);
         head.push('\n');
     }
-    head.push_str(&format!(
-        "limit {}\nbody {}\n\n",
-        limit.unwrap_or(DEFAULT_LIMIT),
-        body.len()
-    ));
+    head.push_str(&format!("limit {}\n", limit.unwrap_or(DEFAULT_LIMIT)));
+    if let Some(redirects) = redirects {
+        head.push_str(&format!("redirects {redirects}\n"));
+    }
+    head.push_str(&format!("body {}\n\n", body.len()));
     // Written whole before anything is read; the service may already have
     // answered and closed, and then the reply is what matters, not EPIPE.
     let written = stream
@@ -306,6 +315,7 @@ mod tests {
             "https://example.invalid/",
             &[("accept", "text/xml")],
             Some(10),
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, Error::Io(_)), "{err}");

@@ -27,7 +27,9 @@ struct Fetched {
 
 fn get_with_auth(url: &str, auth: &str) -> Result<Fetched, JmapError> {
     if crate::td_fetch::available() {
-        let response = crate::td_fetch::get(url, &[("authorization", auth)], None)
+        // No redirects followed for us: the service would drop the
+        // credential on the way, and the loops below follow with it.
+        let response = crate::td_fetch::get(url, &[("authorization", auth)], None, Some(0))
             .map_err(|e| JmapError::Http(e.to_string()))?;
         return Ok(Fetched {
             status: response.status,
