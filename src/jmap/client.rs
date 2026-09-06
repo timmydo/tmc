@@ -13,6 +13,46 @@ fn read_response_body(resp: ureq::Response) -> Result<String, std::io::Error> {
     Ok(buf)
 }
 
+/// One GET with the auth header, as a status, the `location` header if any,
+/// and the body bytes: through td's fetch service inside a jail that
+/// carries `sockets=fetch` (td's APPLICATIONS.md §W.8), through ureq
+/// elsewhere. The two paths agree on what a reply is, and the redirect
+/// loops decide what to do with it; a status of 400 or more is a reply
+/// here, not an error, as the loops expect.
+struct Fetched {
+    status: u16,
+    location: Option<String>,
+    body: Vec<u8>,
+}
+
+fn get_with_auth(url: &str, auth: &str) -> Result<Fetched, JmapError> {
+    if crate::td_fetch::available() {
+        let response = crate::td_fetch::get(url, &[("authorization", auth)], None)
+            .map_err(|e| JmapError::Http(e.to_string()))?;
+        return Ok(Fetched {
+            status: response.status,
+            location: response.header("location").map(str::to_string),
+            body: response.body,
+        });
+    }
+    let agent = ureq::AgentBuilder::new().redirects(0).build();
+    let (status, resp) = match agent.get(url).set("Authorization", auth).call() {
+        Ok(resp) => (resp.status(), resp),
+        Err(ureq::Error::Status(code, resp)) => (code, resp),
+        Err(e) => return Err(JmapError::Http(e.to_string())),
+    };
+    let location = resp.header("location").map(str::to_string);
+    let mut body = Vec::new();
+    resp.into_reader()
+        .read_to_end(&mut body)
+        .map_err(|e| JmapError::Parse(format!("Failed to read response: {}", e)))?;
+    Ok(Fetched {
+        status,
+        location,
+        body,
+    })
+}
+
 use super::types::*;
 
 pub struct JmapClient {
@@ -53,82 +93,67 @@ impl JmapClient {
         auth: &str,
         max_redirects: u32,
     ) -> Result<(String, String), JmapError> {
-        let agent = ureq::AgentBuilder::new().redirects(0).build();
-
         let mut current_url = url.to_string();
 
         for i in 0..max_redirects {
             log_debug!("[JMAP] Request {} to: {}", i + 1, current_url);
 
-            let response = agent.get(&current_url).set("Authorization", auth).call();
+            let fetched = get_with_auth(&current_url, auth).map_err(|e| {
+                log_error!("[JMAP] Connection error: {}", e);
+                e
+            })?;
+            let status = fetched.status;
+            log_debug!("[JMAP] Got {} response", status);
 
-            match response {
-                Ok(resp) => {
-                    let status = resp.status();
-                    log_debug!("[JMAP] Got {} response", status);
-
-                    if (300..400).contains(&status) {
-                        if let Some(location) = resp.header("location") {
-                            log_debug!("[JMAP] Following redirect {} -> {}", status, location);
-                            current_url = Self::resolve_redirect(&current_url, location);
-                            continue;
-                        } else {
-                            return Err(JmapError::Http(format!(
-                                "Redirect {} without Location header",
-                                status
-                            )));
-                        }
+            if (300..400).contains(&status) {
+                match fetched.location {
+                    Some(location) => {
+                        log_debug!("[JMAP] Following redirect {} -> {}", status, location);
+                        current_url = Self::resolve_redirect(&current_url, &location);
+                        continue;
                     }
-
-                    let body = read_response_body(resp)
-                        .map_err(|e| JmapError::Parse(format!("Failed to read response: {}", e)))?;
-
-                    if body.is_empty() {
+                    None => {
                         return Err(JmapError::Http(format!(
-                            "Server returned empty response (status {})",
+                            "Redirect {} without Location header",
                             status
                         )));
                     }
-
-                    log_debug!("[JMAP] Response body length: {} bytes", body.len());
-                    return Ok((current_url, body));
-                }
-                Err(ureq::Error::Status(code, resp)) if (300..400).contains(&code) => {
-                    if let Some(location) = resp.header("location") {
-                        log_debug!("[JMAP] Following redirect {} -> {}", code, location);
-                        current_url = Self::resolve_redirect(&current_url, location);
-                    } else {
-                        return Err(JmapError::Http(format!(
-                            "Redirect {} without Location header",
-                            code
-                        )));
-                    }
-                }
-                Err(ureq::Error::Status(code, resp)) => {
-                    let body = read_response_body(resp).unwrap_or_default();
-                    log_error!("[JMAP] HTTP error {}: {}", code, body);
-
-                    if code == 401 {
-                        return Err(JmapError::Http(
-                            "Authentication failed (401 Unauthorized)".to_string(),
-                        ));
-                    }
-
-                    return Err(JmapError::Http(format!(
-                        "HTTP {} error: {}",
-                        code,
-                        if body.is_empty() {
-                            "(empty response)".to_string()
-                        } else {
-                            truncate_str(&body, 200).to_string()
-                        }
-                    )));
-                }
-                Err(e) => {
-                    log_error!("[JMAP] Connection error: {}", e);
-                    return Err(JmapError::Http(e.to_string()));
                 }
             }
+
+            if status >= 400 {
+                let body = String::from_utf8_lossy(&fetched.body).into_owned();
+                log_error!("[JMAP] HTTP error {}: {}", status, body);
+
+                if status == 401 {
+                    return Err(JmapError::Http(
+                        "Authentication failed (401 Unauthorized)".to_string(),
+                    ));
+                }
+
+                return Err(JmapError::Http(format!(
+                    "HTTP {} error: {}",
+                    status,
+                    if body.is_empty() {
+                        "(empty response)".to_string()
+                    } else {
+                        truncate_str(&body, 200).to_string()
+                    }
+                )));
+            }
+
+            let body = String::from_utf8(fetched.body)
+                .map_err(|e| JmapError::Parse(format!("Failed to read response: {}", e)))?;
+
+            if body.is_empty() {
+                return Err(JmapError::Http(format!(
+                    "Server returned empty response (status {})",
+                    status
+                )));
+            }
+
+            log_debug!("[JMAP] Response body length: {} bytes", body.len());
+            return Ok((current_url, body));
         }
 
         Err(JmapError::Http("Too many redirects".to_string()))
@@ -214,17 +239,45 @@ impl JmapClient {
             .map_err(|e| JmapError::Parse(format!("Failed to serialize request: {}", e)))?;
         log_debug!("[JMAP] Request body: {}", truncate_str(&request_json, 500));
 
-        let response = ureq::post(&self.api_url)
-            .set("Authorization", &auth)
-            .set("Content-Type", "application/json")
-            .send_json(&request)
+        let response_text = if crate::td_fetch::available() {
+            // Inside a td jail that carries `sockets=fetch` (td's
+            // APPLICATIONS.md §W.8): the fetch service carries the request,
+            // and a status of 400 or more is reported as ureq reports one.
+            let response = crate::td_fetch::post(
+                &self.api_url,
+                &[
+                    ("authorization", auth.as_str()),
+                    ("content-type", "application/json"),
+                ],
+                request_json.as_bytes(),
+                None,
+            )
             .map_err(|e| {
                 log_error!("[JMAP] API call failed: {}", e);
                 JmapError::Http(e.to_string())
             })?;
+            if response.status >= 400 {
+                log_error!("[JMAP] API call failed: status code {}", response.status);
+                return Err(JmapError::Http(format!(
+                    "{}: status code {}",
+                    self.api_url, response.status
+                )));
+            }
+            String::from_utf8(response.body)
+                .map_err(|e| JmapError::Parse(format!("Failed to read response: {}", e)))?
+        } else {
+            let response = ureq::post(&self.api_url)
+                .set("Authorization", &auth)
+                .set("Content-Type", "application/json")
+                .send_json(&request)
+                .map_err(|e| {
+                    log_error!("[JMAP] API call failed: {}", e);
+                    JmapError::Http(e.to_string())
+                })?;
 
-        let response_text = read_response_body(response)
-            .map_err(|e| JmapError::Parse(format!("Failed to read response: {}", e)))?;
+            read_response_body(response)
+                .map_err(|e| JmapError::Parse(format!("Failed to read response: {}", e)))?
+        };
 
         log_debug!(
             "[JMAP] Response body ({} bytes): {}",
@@ -968,51 +1021,31 @@ impl JmapClient {
         log_debug!("[JMAP] Downloading blob from: {}", url);
 
         let auth = Self::auth_header(&self.username, &self.password);
-        let agent = ureq::AgentBuilder::new().redirects(0).build();
 
         let mut current_url = url;
         for _ in 0..5 {
-            let response = agent.get(&current_url).set("Authorization", &auth).call();
-
-            match response {
-                Ok(resp) => {
-                    let status = resp.status();
-                    if (300..400).contains(&status) {
-                        if let Some(location) = resp.header("location") {
-                            current_url = Self::resolve_redirect(&current_url, location);
-                            continue;
-                        }
+            let fetched = get_with_auth(&current_url, &auth)?;
+            let status = fetched.status;
+            if (300..400).contains(&status) {
+                match fetched.location {
+                    Some(location) => {
+                        current_url = Self::resolve_redirect(&current_url, &location);
+                        continue;
+                    }
+                    None => {
                         return Err(JmapError::Http(format!(
                             "Redirect {} without Location header",
                             status
                         )));
                     }
-
-                    let mut bytes = Vec::new();
-                    resp.into_reader()
-                        .read_to_end(&mut bytes)
-                        .map_err(|e| JmapError::Parse(format!("Failed to read blob: {}", e)))?;
-
-                    log_info!("[JMAP] Blob downloaded, {} bytes", bytes.len());
-                    return Ok(bytes);
-                }
-                Err(ureq::Error::Status(code, resp)) if (300..400).contains(&code) => {
-                    if let Some(location) = resp.header("location") {
-                        current_url = Self::resolve_redirect(&current_url, location);
-                    } else {
-                        return Err(JmapError::Http(format!(
-                            "Redirect {} without Location header",
-                            code
-                        )));
-                    }
-                }
-                Err(ureq::Error::Status(code, _)) => {
-                    return Err(JmapError::Http(format!("HTTP {} error", code)));
-                }
-                Err(e) => {
-                    return Err(JmapError::Http(e.to_string()));
                 }
             }
+            if status >= 400 {
+                return Err(JmapError::Http(format!("HTTP {} error", status)));
+            }
+
+            log_info!("[JMAP] Blob downloaded, {} bytes", fetched.body.len());
+            return Ok(fetched.body);
         }
 
         Err(JmapError::Http("Too many redirects".to_string()))

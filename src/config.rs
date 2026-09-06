@@ -415,11 +415,7 @@ impl Config {
                     jmap.username,
                     "missing username (in [jmap] or [account.NAME])",
                 )?,
-                password: password_source(
-                    jmap.password_command,
-                    jmap.password_file,
-                    "[jmap]",
-                )?,
+                password: password_source(jmap.password_command, jmap.password_file, "[jmap]")?,
             });
         }
 

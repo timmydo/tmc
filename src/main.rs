@@ -10,6 +10,7 @@ mod jmap;
 mod keybindings;
 mod rules;
 mod spam;
+mod td_fetch;
 mod tui;
 
 use config::{AccountConfig, Config, PasswordSource};
@@ -55,8 +56,8 @@ pub fn run_password_command(cmd: &str) -> Result<String, String> {
 /// Read a password file as `password_file` names it: the whole file with
 /// trailing newlines removed, so a file written by `echo` or an editor works.
 pub fn read_password_file(path: &str) -> Result<String, String> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| format!("failed to read password file {}: {}", path, e))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("failed to read password file {}: {}", path, e))?;
     let password = String::from_utf8(bytes)
         .map_err(|e| format!("password file {} is not valid UTF-8: {}", path, e))?;
     Ok(password.trim_end_matches('\n').to_string())
