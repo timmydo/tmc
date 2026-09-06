@@ -1,8 +1,10 @@
-//! The td fetch service, as a client: HTTP through the unix socket td-jail
-//! binds at `$XDG_RUNTIME_DIR/td-fetch` into a jail that carries
-//! `sockets=fetch` (td's APPLICATIONS.md §W.8). The service holds the TLS
-//! trust, the resolver, the timeouts and the body caps; this side holds a
-//! socket and the framing, in `std` alone.
+//! The td fetch service, as a client: HTTP through the unix socket
+//! `$XDG_RUNTIME_DIR/td-fetch/socket`, whose directory td-jail binds into a
+//! jail that carries `sockets=fetch` (td's APPLICATIONS.md §W.8); the
+//! directory rather than the socket inode, so a restarted service's fresh
+//! socket is at the same path. The service holds the TLS trust, the
+//! resolver, the timeouts and the body caps; this side holds a socket and
+//! the framing, in `std` alone.
 //!
 //! One request per connection: a text head, a blank line, the body; back,
 //! a text head, a blank line, the body, or an `error` line the service
@@ -17,7 +19,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 const PROTOCOL: &str = "td-fetch 1";
-const SOCKET_NAME: &str = "td-fetch";
+const SOCKET_DIRECTORY: &str = "td-fetch";
+const SOCKET_FILE: &str = "socket";
 /// A head line in either direction, the service's bound.
 const MAX_LINE: usize = 8 * 1024;
 /// The service's own ceiling, asked for when the caller names none.
@@ -67,11 +70,13 @@ impl std::fmt::Display for Error {
     }
 }
 
-/// `$XDG_RUNTIME_DIR/td-fetch`, when it is a socket: the grant's whole
-/// contract, with no variable of its own.
+/// `$XDG_RUNTIME_DIR/td-fetch/socket`, when it is a socket: the grant's
+/// whole contract, with no variable of its own.
 pub fn socket_path() -> Option<PathBuf> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")?;
-    let path = PathBuf::from(runtime).join(SOCKET_NAME);
+    let path = PathBuf::from(runtime)
+        .join(SOCKET_DIRECTORY)
+        .join(SOCKET_FILE);
     let meta = std::fs::metadata(&path).ok()?;
     meta.file_type().is_socket().then_some(path)
 }
@@ -278,16 +283,17 @@ mod tests {
     fn the_socket_is_found_under_the_runtime_directory_only_as_a_socket() {
         let dir = std::env::temp_dir().join(format!("td-fetch-client-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join(SOCKET_DIRECTORY)).unwrap();
+        let socket = dir.join(SOCKET_DIRECTORY).join(SOCKET_FILE);
         // This test owns the variable for its duration; the crate's other
         // tests do not read it.
         std::env::set_var("XDG_RUNTIME_DIR", &dir);
         assert_eq!(socket_path(), None);
-        std::fs::write(dir.join(SOCKET_NAME), b"not a socket").unwrap();
+        std::fs::write(&socket, b"not a socket").unwrap();
         assert_eq!(socket_path(), None);
-        std::fs::remove_file(dir.join(SOCKET_NAME)).unwrap();
-        let listener = std::os::unix::net::UnixListener::bind(dir.join(SOCKET_NAME)).unwrap();
-        assert_eq!(socket_path(), Some(dir.join(SOCKET_NAME)));
+        std::fs::remove_file(&socket).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        assert_eq!(socket_path(), Some(socket.clone()));
         assert!(available());
         // A request against a listener that never answers is a reply error,
         // not a hang: the listener accepts and closes.
